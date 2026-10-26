@@ -4,8 +4,7 @@ import json
 import os
 import threading
 import time
-import urllib.error
-import urllib.request
+import urllib.error  # urllib.request 连带 ssl/http/email，导入要 0.1 秒，放到第一次联网时再导入
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import __version__
@@ -64,6 +63,7 @@ def candidate_urls(url):
 
 
 def _open(url, data=None, headers=None):
+    import urllib.request
     h = {"User-Agent": USER_AGENT}
     if headers:
         h.update(headers)

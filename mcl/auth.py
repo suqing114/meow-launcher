@@ -6,7 +6,6 @@ import threading
 import time
 import urllib.error
 import urllib.parse
-import urllib.request
 import uuid as uuidlib
 
 from . import net
@@ -45,7 +44,8 @@ class AuthError(Exception):
 
 def _request(url, data=None, form=None, token=None):
     """返回 (状态码, json 字典, 响应头)；HTTP 错误不抛异常，方便读错误信息。"""
-    headers = {"User-Agent": net.USER_AGENT, "Accept": "application/json"}
+    import urllib.request  # 第一次联网时才导入，见 net.py
+    headers ={"User-Agent": net.USER_AGENT, "Accept": "application/json"}
     body = None
     if form is not None:
         body = urllib.parse.urlencode(form).encode("utf-8")

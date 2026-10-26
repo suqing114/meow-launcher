@@ -96,11 +96,6 @@ def decode_line(raw):
         return raw.decode(locale.getpreferredencoding(False), "replace")
 
 
-def lerp_color(a, b, t):
-    ca, cb = theme._rgb(a), theme._rgb(b)
-    return "#%02x%02x%02x" % tuple(int(x + (y - x) * t) for x, y in zip(ca, cb))
-
-
 class Log4jXml:
     """把游戏 log4j XMLLayout 的输出还原成普通的一行行日志。"""
     _EVENT = re.compile(r'<log4j:Event logger="[^"]*" timestamp="(\d+)" level="(\w+)" thread="([^"]*)"')
@@ -229,7 +224,7 @@ class App(tk.Tk):
         self.minsize(980, 640)
         self.configure(bg=BG)
         self.theme = T = theme.Theme(self)
-        self.iconphoto(True, T.keep("icon64", theme.cat_logo(64)), T.keep("icon32", theme.cat_logo(32)))
+        self.iconphoto(True, T.keep("icon64", theme.cat_logo(64)))
 
         self.cfg = load_config()
         net.set_source(self.cfg["source"])
@@ -262,15 +257,14 @@ class App(tk.Tk):
         self.content.rowconfigure(0, weight=1)
         self.content.columnconfigure(0, weight=1)
 
-        self.pages, self.nav = {}, {}
+        # 页面第一次打开时才创建，启动时只建首页
+        self.pages, self.nav, self.page_classes = {}, {}, {}
         for key, text, icon, cls in [("launch", "启动游戏", "play", LaunchPage),
                                      ("download", "下载游戏", "download", DownloadPage),
                                      ("mods", "下载 Mod", "puzzle", ModPage),
                                      ("manage", "Mod 管理", "library", ModManagePage),
                                      ("settings", "设置", "settings", SettingsPage)]:
-            page = cls(self.content, self)
-            page.grid(row=0, column=0, sticky="nsew")
-            self.pages[key] = page
+            self.page_classes[key] = cls
             item = NavItem(side, T, icon, text, lambda k=key: self.show(k))
             item.pack(fill="x", padx=px(12), pady=px(2))
             self.nav[key] = item
@@ -290,7 +284,14 @@ class App(tk.Tk):
         self.scan_java()
 
     def show(self, key):
-        self.pages[key].tkraise()
+        if key not in self.pages:
+            self.pages[key] = self.page_classes[key](self.content, self)
+        # 只摆放当前页；叠在下面的页面也会参与布局和绘制，切页会很卡
+        for k, page in self.pages.items():
+            if k == key:
+                page.grid(row=0, column=0, sticky="nsew")
+            else:
+                page.grid_remove()
         for k, item in self.nav.items():
             item.set_active(k == key)
         self.pages[key].on_show()
@@ -304,7 +305,7 @@ class App(tk.Tk):
                        "info": (ACCENT, "info")}[kind]
         f = tk.Frame(self.content, bg="#23263a")
         if T.icon_family:
-            tk.Label(f, text=T.icon(icon), font=T.icon_font(11), fg=color, bg="#23263a").pack(
+            tk.Label(f, text=T.icon(icon), font=T.icon_font(12), fg=color, bg="#23263a").pack(
                 side="left", padx=(T.px(16), 0), pady=T.px(11))
         tk.Label(f, text=text, fg="#ffffff", bg="#23263a", font=(FAMILY, 10)).pack(
             side="left", padx=T.px(12), pady=T.px(11))
@@ -444,14 +445,17 @@ class Banner(tk.Canvas):
         self.bw, self.bh = px(206), px(64)
         self.imgs = {k: T.keep(f"hero.{k}", theme.box(self.bw, self.bh, px(16), c))
                      for k, c in (("n", "#ffffff"), ("h", "#eef0ff"), ("d", "#dfe3fa"))}
-        d1, d2 = px(260), px(150)
-        self.deco1 = T.keep("deco1", theme.Raster(d1, d1).paint(theme.circle(d1 / 2, d1 / 2, d1 / 2), "#ffffff", 0.09))
-        self.deco2 = T.keep("deco2", theme.Raster(d2, d2).paint(theme.circle(d2 / 2, d2 / 2, d2 / 2), "#ffffff", 0.07))
+        # 背景（渐变 + 装饰圆 + 左侧圆角）一次画成一张不透明大图，比每次重绘都叠几百个矩形和半透明图快得多
         r = px(16)
-        self.corners = []
-        for cx, cy, anchor in ((r, r, "nw"), (0, r, "ne"), (r, 0, "sw"), (0, 0, "se")):
+        wide = max(master.winfo_screenwidth(), px(1200))
+        self.bg = T.keep("banner", theme.banner_bg(
+            wide, self.h, px(900), r, ACCENT, ACCENT2, BG,
+            [(px(690), px(10), px(130), 0.09), (px(435), self.h * 0.55 + px(75), px(75), 0.07)]))
+        self.corners = []  # 右侧圆角跟着窗口宽度走，单独画
+        for cx, cy, anchor in ((0, r, "ne"), (0, 0, "se")):
             img = theme.Raster(r, r).paint(lambda x, y, cx=cx, cy=cy: r - math.hypot(x - cx, y - cy), BG)
             self.corners.append((T.keep(f"corner.{anchor}", img), anchor))
+        self._pending = None
         self.bind("<Configure>", lambda e: self.redraw())
         self.tag_bind("btn", "<Enter>", lambda e: self._set_hover(True))
         self.tag_bind("btn", "<Leave>", lambda e: self._set_hover(False))
@@ -476,22 +480,22 @@ class Banner(tk.Canvas):
         self._draw_button()
 
     def redraw(self):
+        """合并同一轮里的多次重绘请求（启动时会连着 set_info 好几次）。"""
+        if not self._pending:
+            self._pending = self.after_idle(self._redraw)
+
+    def _redraw(self):
+        self._pending = None
         px = self.T.px
         self.delete("all")
         w, h = max(self.winfo_width(), 10), self.h
-        step = 3
-        for x in range(0, w, step):
-            self.create_rectangle(x, 0, x + step, h, fill=lerp_color(ACCENT, ACCENT2, x / w), outline="")
-        self.create_image(w * 0.62, -px(120), image=self.deco1, anchor="nw")
-        self.create_image(w * 0.40, h * 0.55, image=self.deco2, anchor="nw")
-        self.create_text(px(32), px(54), anchor="w", text=self.title, fill="#ffffff", font=(FAMILY, 20, "bold"))
+        self.create_image(0, 0, image=self.bg, anchor="nw")
+        self.create_text(px(32), px(54), anchor="w", text=self.title, fill="#ffffff", font=(FAMILY, 18, "bold"))
         self.create_text(px(33), px(92), anchor="w", text=self.sub, fill="#e6e9ff", font=(FAMILY, 10))
         self.create_text(px(33), px(126), anchor="w", text="=^･ω･^=  准备好冒险了吗？", fill="#cfd5ff",
                          font=(FAMILY, 9))
         for img, anchor in self.corners:
-            x = 0 if "w" in anchor else w
-            y = 0 if "n" in anchor else h
-            self.create_image(x, y, image=img, anchor=anchor)
+            self.create_image(w, 0 if "n" in anchor else h, image=img, anchor=anchor)
         self._draw_button()
 
     def _draw_button(self):
@@ -504,13 +508,13 @@ class Banner(tk.Canvas):
         color = ACCENT if self.enabled else "#8f99d6"
         cy = y + self.bh / 2
         if self.T.icon_family:
-            self.create_text(x + px(30), cy, text=self.T.icon("play"), font=self.T.icon_font(17),
+            self.create_text(x + px(30), cy, text=self.T.icon("play"), font=self.T.icon_font(16),
                              fill=color, tags="btn")
         self.create_text(x + px(54), cy - (px(9) if self.btn_sub else 0), anchor="w", text=self.btn_text,
                          fill=color, font=(FAMILY, 13, "bold"), tags="btn")
         if self.btn_sub:
             self.create_text(x + px(55), cy + px(12), anchor="w", text=self.btn_sub[:24], fill=SUB,
-                             font=(FAMILY, 8), tags="btn")
+                             font=(FAMILY, 9), tags="btn")
 
 
 class LaunchPage(Page):
@@ -636,7 +640,7 @@ class LaunchPage(Page):
             return
         n = self.px(40)
         self.av.create_image(n / 2, n / 2, image=self.T.avatar(acc["name"], 40))
-        self.av.create_text(n / 2, n / 2, text=acc["name"][:1].upper(), fill="#ffffff", font=(FAMILY, 14, "bold"))
+        self.av.create_text(n / 2, n / 2, text=acc["name"][:1].upper(), fill="#ffffff", font=(FAMILY, 13, "bold"))
         kind = auth.TYPE_NAMES.get(acc["type"], acc["type"])
         if acc["type"] == "authlib":
             kind += f" · {acc.get('server_name')}"
@@ -887,7 +891,7 @@ class AddAccountDialog(tk.Toplevel):
                   + ("" if has_id else "\n\n⚠ 还没有填写 Client ID，请先到「设置」页填写。"),
                   style="Card.TLabel", wraplength=px(420), justify="left").grid(row=0, column=0, columnspan=2,
                                                                                sticky="w")
-        self.lbl_code = tk.Label(f, text="· · · ·", bg=CARD, fg=ACCENT, font=(MONO, 26, "bold"))
+        self.lbl_code = tk.Label(f, text="· · · ·", bg=CARD, fg=ACCENT, font=(MONO, 22, "bold"))
         self.lbl_code.grid(row=1, column=0, columnspan=2, pady=px(16))
         self.btn_ms = ttk.Button(f, text="开始登录", style="Accent.TButton", command=self._ms_start)
         self.btn_ms.grid(row=2, column=0, sticky="w")
@@ -1195,7 +1199,7 @@ class ModPage(Page):
         if self.T.icon_family:
             ttk.Label(r, text=self.T.icon("search"), style="CardIcon.TLabel").pack(side="left", padx=(px(4), px(8)))
         self.var_q = tk.StringVar()
-        e = ttk.Entry(r, textvariable=self.var_q, font=(FAMILY, 11))
+        e = ttk.Entry(r, textvariable=self.var_q)
         e.pack(side="left", fill="x", expand=True)
         e.bind("<Return>", lambda ev: self.search(0))
         ttk.Button(r, text="搜索", style="Accent.TButton", command=lambda: self.search(0)).pack(
@@ -1548,7 +1552,7 @@ class SettingsPage(Page):
 
         foot = ttk.Frame(self)
         foot.pack(fill="x", pady=(px(18), 0))
-        ttk.Button(foot, text="保存设置", style="Big.Accent.TButton", command=self.save).pack(side="left")
+        ttk.Button(foot, text="保存设置", style="Big.BgAccent.TButton", command=self.save).pack(side="left")
         ttk.Label(foot, text="账户保存在 accounts.json（含登录令牌，不要发给别人）\n"
                              "每个版本的存档 / Mod / 配置都单独放在 versions/<版本名> 下（版本隔离）",
                   style="Sub.TLabel", justify="left").pack(side="left", padx=px(18))

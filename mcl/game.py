@@ -30,7 +30,13 @@ def _os_name():
 
 
 OS_NAME = _os_name()
-_MACHINE = platform.machine().lower()
+if OS_NAME == "windows":
+    # 不用 platform.machine()/version()：Python 3.12 在 Windows 上会为此做一次 WMI 查询，导入就要 0.2 秒
+    _MACHINE = (os.environ.get("PROCESSOR_ARCHITEW6432") or os.environ.get("PROCESSOR_ARCHITECTURE", "AMD64")).lower()
+    _OS_VERSION = "%d.%d.%d" % tuple(sys.getwindowsversion()[:3])
+else:
+    _MACHINE = platform.machine().lower()
+    _OS_VERSION = platform.release()
 IS_64 = _MACHINE in ("amd64", "x86_64", "arm64", "aarch64")
 ARCH = "arm64" if _MACHINE in ("arm64", "aarch64") else ("x86_64" if IS_64 else "x86")
 
@@ -51,7 +57,7 @@ def rule_allows(rules, features=None):
                 ok = False
             if "arch" in o and o["arch"] != ARCH:
                 ok = False
-            if "version" in o and not re.search(o["version"], platform.version()):
+            if "version" in o and not re.search(o["version"], _OS_VERSION):
                 ok = False
         for k, v in (r.get("features") or {}).items():
             if bool(features.get(k)) != v:
