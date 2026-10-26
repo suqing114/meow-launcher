@@ -5,6 +5,7 @@ import math
 import os
 import queue
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -261,8 +262,8 @@ class App(tk.Tk):
         self.pages, self.nav, self.page_classes = {}, {}, {}
         for key, text, icon, cls in [("launch", "启动游戏", "play", LaunchPage),
                                      ("download", "下载游戏", "download", DownloadPage),
-                                     ("mods", "下载 Mod", "puzzle", ModPage),
-                                     ("manage", "Mod 管理", "library", ModManagePage),
+                                     ("mods", "下载资源", "puzzle", ModPage),
+                                     ("manage", "资源管理", "library", ModManagePage),
                                      ("settings", "设置", "settings", SettingsPage)]:
             self.page_classes[key] = cls
             item = NavItem(side, T, icon, text, lambda k=key: self.show(k))
@@ -279,13 +280,29 @@ class App(tk.Tk):
         tk.Label(foot, text=f"v{__version__}", fg="#5d6283", bg=SIDEBAR, font=(FAMILY, 9)).pack(side="right")
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
-        self.show("launch")
         theme.style_titlebar(self)
+        # 先让窗口和加载遮罩显示出来，再建首页
+        self._boot = Overlay(self.content, T, "正在加载…", bg=BG)
+        self.after(30, self._first_show)
+
+    def _first_show(self):
+        self.show("launch")
         self.scan_java()
 
     def show(self, key):
+        if getattr(self, "_building", False):
+            return
         if key not in self.pages:
-            self.pages[key] = self.page_classes[key](self.content, self)
+            # 页面第一次打开要现建，先盖一层遮罩画出来，免得像是点了没反应
+            ov = getattr(self, "_boot", None) or Overlay(self.content, self.theme, "加载中…", bg=BG)
+            self._boot = None
+            self._building = True
+            try:
+                ov.update()  # Windows 上新窗口要处理一轮消息才会画出来
+                self.pages[key] = self.page_classes[key](self.content, self)
+            finally:
+                self._building = False
+                ov.close()
         # 只摆放当前页；叠在下面的页面也会参与布局和绘制，切页会很卡
         for k, page in self.pages.items():
             if k == key:
@@ -378,7 +395,8 @@ class App(tk.Tk):
 
     def _on_close(self):
         try:
-            self.pages["launch"].store()
+            if "launch" in self.pages:
+                self.pages["launch"].store()
             save_config(self.cfg)
         finally:
             self.destroy()
@@ -561,8 +579,8 @@ class LaunchPage(Page):
         self.lbl_info = ttk.Label(c, text="", style="CardSub.TLabel")
         self.lbl_info.pack(anchor="w", fill="x", pady=(0, px(8)))
         r = self.row(c)
-        ttk.Button(r, text="版本文件夹", command=lambda: self._open("")).pack(side="left")
-        ttk.Button(r, text="mods", command=lambda: self._open("mods")).pack(side="left", padx=px(6))
+        ttk.Button(r, text="管理", command=self._manage).pack(side="left")
+        ttk.Button(r, text="文件夹", command=lambda: self._open("")).pack(side="left", padx=px(6))
         ttk.Button(r, text="删除", style="Danger.TButton", command=self._delete).pack(side="left")
 
         # 运行设置
@@ -670,10 +688,12 @@ class LaunchPage(Page):
             self.banner.set_info(sub="还没有安装游戏，先去「下载游戏」装一个吧", btn_sub="")
             return
         try:
-            gv = self.app.gd.game_version_of(vid)
-            loader = LOADER_NAMES.get(self.app.gd.loader_of(vid), "原版")
+            info = self.app.gd.instance_info(vid)
+            gv = info["game"]
+            loader = " + ".join(f"{game.LOADER_NAMES[k]} {game.short_version(k, gv, v)}"
+                                for k, v in info["loaders"].items()) or "原版"
             need = self.app.gd.required_java(vid)
-            self.lbl_info.configure(text=f"{gv} · {loader} · 需要 Java {need}")
+            self.lbl_info.configure(text=f"{gv} · {loader}")
             self.banner.set_info(sub=f"当前版本  {vid}    ·    {loader}    ·    Java {need}", btn_sub=vid)
         except Exception as e:
             self.lbl_info.configure(text=f"版本文件有问题：{e}")
@@ -713,6 +733,11 @@ class LaunchPage(Page):
             pass
         cfg["java"] = self._selected_java()
         cfg["last_version"] = self.var_ver.get()
+
+    def _manage(self):
+        vid = self.var_ver.get()
+        if vid:
+            InstanceDialog(self.app, vid)
 
     def _open(self, sub):
         vid = self.var_ver.get()
@@ -993,15 +1018,400 @@ class AddAccountDialog(tk.Toplevel):
         self.lbl_ygg.configure(text=f"失败：{e}")
 
 
+# ====================================================================== 通用部件
+
+class Overlay(tk.Frame):
+    """加载遮罩：盖在某个区域上，中间一个转圈和一行字。"""
+
+    def __init__(self, target, T, text="加载中…", bg=CARD, inset=0):
+        super().__init__(target, bg=bg)
+        self.T = T
+        n = T.px(34)
+        self.n = n
+        self.cv = tk.Canvas(self, width=n, height=n, bg=bg, highlightthickness=0, bd=0)
+        self.cv.place(relx=0.5, rely=0.42, anchor="center")
+        self.lbl = tk.Label(self, text=text, bg=bg, fg=SUB, font=(FAMILY, 10))
+        self.lbl.place(relx=0.5, rely=0.42, anchor="n", y=n // 2 + T.px(10))
+        i = T.px(inset)
+        self.place(x=i, y=i, relwidth=1, relheight=1, width=-2 * i, height=-2 * i)
+        self.lift()
+        self.angle = 90
+        self._job = None
+        self._spin()
+
+    def _spin(self):
+        w = self.T.px(3.5)
+        n = self.n
+        self.cv.delete("all")
+        self.cv.create_oval(w, w, n - w, n - w, outline=theme.LINE, width=w)
+        self.cv.create_arc(w, w, n - w, n - w, start=self.angle, extent=110, style="arc", outline=ACCENT, width=w)
+        self.angle = (self.angle - 14) % 360
+        self._job = self.after(33, self._spin)
+
+    def show_message(self, text):
+        """停止转圈，只显示一行提示（加载失败、没有结果时用）。"""
+        if self._job:
+            self.after_cancel(self._job)
+            self._job = None
+        self.cv.place_forget()
+        self.lbl.configure(text=text)
+        self.lbl.place(relx=0.5, rely=0.42, anchor="center", y=0)
+
+    def close(self):
+        if self._job:
+            self.after_cancel(self._job)
+        self.destroy()
+
+
+def overlay_once(holder, attr, target, T, text, **kw):
+    """在 target 上换一个新遮罩，旧的先关掉；返回新遮罩。"""
+    old = getattr(holder, attr, None)
+    if old is not None and old.winfo_exists():
+        old.close()
+    ov = Overlay(target, T, text, **kw)
+    setattr(holder, attr, ov)
+    return ov
+
+
+def close_overlay(holder, attr):
+    ov = getattr(holder, attr, None)
+    if ov is not None and ov.winfo_exists():
+        ov.close()
+    setattr(holder, attr, None)
+
+
+class Segmented(ttk.Frame):
+    """一排互斥的按钮（类似选项卡）。"""
+
+    def __init__(self, master, items, command, style_bg="Surface.TFrame"):
+        super().__init__(master, style=style_bg)
+        self.command = command
+        self.buttons = {}
+        for key, text in items:
+            b = ttk.Button(self, text=text, command=lambda k=key: self.select(k, True))
+            b.pack(side="left", padx=(0, 4))
+            self.buttons[key] = b
+        self.current = items[0][0]
+        self.select(self.current)
+
+    def select(self, key, notify=False):
+        self.current = key
+        for k, b in self.buttons.items():
+            b.configure(style="Accent.TButton" if k == key else "TButton")
+        if notify:
+            self.command(key)
+
+
+def center_on(win, parent):
+    win.update_idletasks()
+    x = parent.winfo_rootx() + (parent.winfo_width() - win.winfo_width()) // 2
+    y = parent.winfo_rooty() + (parent.winfo_height() - win.winfo_height()) // 3
+    win.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+
+
+# ====================================================================== 加载器选择
+
+KIND_ORDER = ["forge", "neoforge", "fabric", "quilt", "optifine"]
+
+
+def default_instance_name(gv, sel):
+    if not sel:
+        return gv or ""
+    parts = [gv]
+    for k in KIND_ORDER:
+        if k in sel:
+            spec = sel[k]
+            v = spec["version"] if isinstance(spec, dict) else spec
+            parts.append(f"{game.LOADER_NAMES[k]}-{game.short_version(k, gv, v)}")
+    return "-".join(parts)
+
+
+class LoaderPicker(ttk.Frame):
+    """HMCL 式的加载器多选：每个加载器一行，冲突的会变灰并说明原因。"""
+
+    def __init__(self, master, app, on_change=None):
+        super().__init__(master, style="Surface.TFrame")
+        self.app = app
+        self.T = app.theme
+        self.on_change = on_change
+        self.gv = None
+        self.sel = {}
+        self.of_forge = ""
+        self.rows = {}
+        px = self.T.px
+        self.columnconfigure(1, weight=1)
+        for i, kind in enumerate(KIND_ORDER):
+            name = ttk.Label(self, text=game.LOADER_NAMES[kind], style="Card.TLabel", width=9)
+            status = ttk.Label(self, text="", style="CardSub.TLabel")
+            btn = ttk.Button(self, text="选择", command=lambda k=kind: self.pick(k))
+            bx = ttk.Button(self, text="✕", style="Ghost.TButton", width=2, command=lambda k=kind: self.remove(k))
+            name.grid(row=i, column=0, sticky="w", pady=px(3))
+            status.grid(row=i, column=1, sticky="w", padx=(px(6), px(6)))
+            btn.grid(row=i, column=2, sticky="e")
+            bx.grid(row=i, column=3, sticky="e", padx=(px(4), 0))
+            self.rows[kind] = (name, status, btn, bx)
+        self.warn = ttk.Label(self, text="", style="CardDanger.TLabel", wraplength=px(280), justify="left")
+        self.warn.grid(row=len(KIND_ORDER), column=0, columnspan=4, sticky="w", pady=(px(4), 0))
+        self.bind("<Configure>", lambda e: self.warn.configure(wraplength=max(e.width - 4, 100)))
+        self.refresh()
+
+    def set_game(self, gv, sel=None):
+        self.gv = gv
+        self.sel = dict(sel or {})
+        self.of_forge = ""
+        self.refresh()
+
+    def selection(self):
+        return dict(self.sel)
+
+    def remove(self, kind):
+        self.sel.pop(kind, None)
+        self.refresh()
+        if self.on_change:
+            self.on_change()
+
+    def pick(self, kind):
+        VersionPickerDialog(self.app, kind, self.gv, self._picked)
+
+    def _picked(self, kind, spec, info=None):
+        self.sel[kind] = spec
+        if kind == "optifine":  # BMCLAPI 会标出这个 OptiFine 是配哪个 Forge 测试的
+            self.of_forge = ((info or {}).get("forge") or "").replace("Forge", "").strip()
+        self.refresh()
+        if self.on_change:
+            self.on_change()
+
+    def refresh(self):
+        for kind, (name, status, btn, bx) in self.rows.items():
+            blockers = [game.LOADER_NAMES[o] for o in self.sel if o in game.CONFLICTS[kind]]
+            if kind in self.sel:
+                spec = self.sel[kind]
+                v = spec["version"] if isinstance(spec, dict) else spec
+                text = game.short_version(kind, self.gv or "", v) + ("（本机文件）" if isinstance(spec, dict) else "")
+                name.configure(style="Card.TLabel")
+                status.configure(text=text, style="CardAccent.TLabel")
+                btn.configure(text="更换")
+                btn.state(["!disabled"])
+                bx.grid()
+            elif blockers:
+                name.configure(style="CardMuted.TLabel")
+                status.configure(text=f"与 {blockers[0]} 冲突", style="CardSub.TLabel")
+                btn.configure(text="选择")
+                btn.state(["disabled"])
+                bx.grid_remove()
+            else:
+                name.configure(style="Card.TLabel" if self.gv else "CardMuted.TLabel")
+                status.configure(text="不安装" if self.gv else "先选择游戏版本", style="CardSub.TLabel")
+                btn.configure(text="选择")
+                btn.state(["!disabled"] if self.gv else ["disabled"])
+                bx.grid_remove()
+        # OptiFine 和新版 Forge 经常不兼容，BMCLAPI 标了它是配哪个 Forge 测试的
+        want, warn = self.of_forge, ""
+        if "optifine" in self.sel and "forge" in self.sel and want and want != "N/A":
+            fs = self.sel["forge"]
+            have = game.short_version("forge", self.gv or "", fs["version"] if isinstance(fs, dict) else fs)
+            if have != want:
+                warn = f"⚠ 这个 OptiFine 是配 Forge {want} 测试的，搭配 Forge {have} 可能会崩溃"
+        self.warn.configure(text=warn)
+        self.warn.grid() if warn else self.warn.grid_remove()
+
+
+class VersionPickerDialog(tk.Toplevel):
+    """选择某个加载器的版本，或者用本机文件。"""
+
+    def __init__(self, app, kind, gv, on_pick):
+        super().__init__(app)
+        self.app, self.kind, self.gv, self.on_pick = app, kind, gv, on_pick
+        self.T = app.theme
+        px = self.T.px
+        name = game.LOADER_NAMES[kind]
+        self.title(f"选择 {name} 版本")
+        self.configure(bg=BG)
+        self.transient(app)
+        self.protocol("WM_DELETE_WINDOW", self._close)
+        self._closed = False
+        self._info = {}
+        wrap = ttk.Frame(self, padding=(px(20), px(16)))
+        wrap.pack(fill="both", expand=True)
+        ttk.Label(wrap, text=name, style="H1.TLabel").pack(anchor="w")
+        ttk.Label(wrap, text=f"Minecraft {gv}", style="Sub.TLabel").pack(anchor="w", pady=(0, px(12)))
+        bottom = ttk.Frame(wrap)
+        bottom.pack(side="bottom", fill="x", pady=(px(14), 0))
+        ttk.Button(bottom, text="从本机文件…", style="Bg.TButton", command=self._local).pack(side="left")
+        ttk.Button(bottom, text="取消", style="Bg.TButton", command=self._close).pack(side="right")
+        self.btn_ok = ttk.Button(bottom, text="确定", style="BgAccent.TButton", command=self._ok)
+        self.btn_ok.pack(side="right", padx=px(8))
+        self.btn_ok.state(["disabled"])
+        box = ttk.Frame(wrap, style="Card.TFrame", padding=px(6))
+        box.pack(fill="both", expand=True)
+        frame, self.tree = make_tree(box, ("ver", "tag"), ("版本", "说明"), (220, 170), height=12)
+        frame.pack(fill="both", expand=True)
+        self.tree.bind("<Double-1>", lambda e: self._ok())
+        self.tree.bind("<<TreeviewSelect>>", lambda e: self.btn_ok.state(["!disabled"]))
+        self.geometry(f"{px(480)}x{px(540)}")
+        center_on(self, app)
+        theme.style_titlebar(self)
+        self.grab_set()
+        self.ov = Overlay(box, self.T, f"正在获取 {name} 版本…", inset=6)
+        app.bg(lambda: game.loader_versions(kind, gv), self._fill, self._fail)
+
+    def _fill(self, lst):
+        if self._closed:
+            return
+        self.ov.close()
+        self._info = {x["version"]: x for x in lst}
+        word = {"forge": "推荐", "optifine": "正式版"}.get(self.kind, "稳定版")
+        for x in lst:
+            tag = word if x["stable"] else ("预览版" if self.kind == "optifine" else "测试版")
+            if self.kind == "optifine" and x.get("forge"):
+                tag += f" · {x['forge']}"
+            self.tree.insert("", "end", iid=x["version"], values=(game.short_version(self.kind, self.gv, x["version"]), tag),
+                             tags=("accent",) if x["stable"] else ())
+        restripe(self.tree)
+        if lst:
+            first = next((x["version"] for x in lst if x["stable"]), lst[0]["version"])
+            self.tree.selection_set(first)
+            self.tree.see(first)
+        else:
+            self.ov = Overlay(self.tree.master.master, self.T, "", inset=6)
+            self.ov.show_message(f"Minecraft {self.gv} 没有可用的 {game.LOADER_NAMES[self.kind]}")
+
+    def _fail(self, e):
+        if not self._closed:
+            self.ov.show_message(f"获取失败：{e}")
+
+    def _ok(self):
+        sel = self.tree.selection()
+        if sel:
+            self.on_pick(self.kind, sel[0], self._info.get(sel[0]))
+            self._close()
+
+    def _local(self):
+        ft = [("版本配置", "*.json")] if self.kind in ("fabric", "quilt") else [("Jar 文件", "*.jar")]
+        path = filedialog.askopenfilename(parent=self, title=f"选择本机的 {game.LOADER_NAMES[self.kind]} 文件",
+                                          filetypes=ft + [("所有文件", "*.*")])
+        if not path:
+            return
+        try:
+            kind, gv, ver = game.inspect_local_file(path)
+        except Exception as e:
+            messagebox.showerror("无法使用这个文件", str(e), parent=self)
+            return
+        if kind != self.kind:
+            messagebox.showerror("文件不对", f"这是 {game.LOADER_NAMES[kind]} 的文件，不是 {game.LOADER_NAMES[self.kind]}",
+                                 parent=self)
+            return
+        if gv and gv != self.gv:
+            messagebox.showerror("版本不匹配", f"这个文件是给 Minecraft {gv} 用的，当前是 {self.gv}", parent=self)
+            return
+        self.on_pick(self.kind, {"version": ver, "file": os.path.normpath(path)})
+        self._close()
+
+    def _close(self):
+        self._closed = True
+        self.grab_release()
+        self.destroy()
+
+
+class InstanceDialog(tk.Toplevel):
+    """管理已安装的版本：更换、卸载、加装加载器（可用本机文件）。"""
+
+    def __init__(self, app, vid):
+        super().__init__(app)
+        self.app, self.vid = app, vid
+        self.T = app.theme
+        px = self.T.px
+        gd = app.gd
+        self.info = gd.instance_info(vid)
+        self.gv = self.info["game"]
+        self.title("管理版本")
+        self.configure(bg=BG)
+        self.resizable(False, False)
+        self.transient(app)
+        self.protocol("WM_DELETE_WINDOW", self._close)
+        wrap = ttk.Frame(self, padding=(px(22), px(18)))
+        wrap.pack(fill="both", expand=True)
+        ttk.Label(wrap, text=vid, style="H1.TLabel").pack(anchor="w")
+        ttk.Label(wrap, text=f"Minecraft {self.gv}", style="Sub.TLabel").pack(anchor="w", pady=(0, px(12)))
+
+        card = ttk.Frame(wrap, style="Card.TFrame", padding=px(18))
+        card.pack(fill="x")
+        ttk.Label(card, text="模组加载器", style="CardTitle.TLabel").pack(anchor="w", pady=(0, px(8)))
+        self.picker = LoaderPicker(card, app, self._changed)
+        self.picker.pack(fill="x")
+        self.picker.set_game(self.gv, self.info["loaders"])
+        self.var_name = tk.StringVar(value=vid)
+        if vid == self.gv:
+            r = ttk.Frame(card, style="Surface.TFrame")
+            r.pack(fill="x", pady=(px(12), 0))
+            ttk.Label(r, text="新版本名称", style="Card.TLabel").pack(side="left", padx=(0, px(10)))
+            ttk.Entry(r, textvariable=self.var_name).pack(side="left", fill="x", expand=True)
+            note = "这是原版版本，其他版本都依赖它；加装加载器会另存为一个新版本。"
+        else:
+            note = "更换或卸载加载器不会删除存档和配置；mods 里的 Mod 可能要换成对应加载器的版本。"
+        ttk.Label(card, text=note, style="CardSub.TLabel", wraplength=px(430), justify="left").pack(
+            anchor="w", pady=(px(12), 0))
+        self.bar = ttk.Progressbar(card, mode="determinate")
+        self.lbl = ttk.Label(card, text="", style="CardSub.TLabel", wraplength=px(430), justify="left")
+
+        bottom = ttk.Frame(wrap)
+        bottom.pack(fill="x", pady=(px(16), 0))
+        ttk.Button(bottom, text="取消", style="Bg.TButton", command=self._close).pack(side="right")
+        self.btn = ttk.Button(bottom, text="应用更改", style="BgAccent.TButton", command=self._apply)
+        self.btn.pack(side="right", padx=px(8))
+        center_on(self, app)
+        theme.style_titlebar(self)
+        self.grab_set()
+
+    def _changed(self):
+        if self.vid == self.gv:
+            self.var_name.set(default_instance_name(self.gv, self.picker.selection()))
+
+    def _progress(self, text, done, total):
+        self.bar.configure(maximum=max(total, 1), value=done)
+        self.lbl.configure(text=f"{text}：{done}/{total}" if total > 1 else f"{text}……")
+
+    def _apply(self):
+        px = self.T.px
+        sel = self.picker.selection()
+        if sel == self.info["loaders"]:
+            self._close()
+            return
+        if self.vid == self.gv:
+            name, replace = self.var_name.get().strip(), False
+        else:
+            name, replace = self.vid, True
+        self.btn.state(["disabled"])
+        self.bar.pack(fill="x", pady=(px(12), px(4)))
+        self.lbl.pack(anchor="w")
+        progress = self.app.progress_cb(self._progress)
+        gd, gv = self.app.gd, self.gv
+
+        def ok(vid):
+            self.app.versions_changed(select=vid)
+            what = "已卸载所有加载器" if not sel else "加载器已更新"
+            self.app.toast(f"{vid}：{what}")
+            self._close()
+
+        def err(e):
+            self.btn.state(["!disabled"])
+            self.lbl.configure(text=f"失败：{e}")
+            self.app.error(e)
+        self.app.bg(lambda: gd.install_instance(name, gv, sel, progress, self.app.manifest, replace), ok, err)
+
+    def _close(self):
+        self.grab_release()
+        self.destroy()
+
+
 # ====================================================================== 下载游戏
 
 class DownloadPage(Page):
     def build(self):
         px = self.px
-        self.header("下载游戏", "安装任意版本的 Minecraft，可以顺手装上 Fabric / Forge / NeoForge")
+        self.header("下载游戏", "安装任意版本的 Minecraft，可以同时装上多个兼容的模组加载器")
         self.selected = None
-        self._loader_list = []
-        self._token = 0
+        self._auto_name = ""
 
         bar = self.card(pad=12)
         bar.pack(fill="x", pady=(0, px(14)))
@@ -1021,36 +1431,33 @@ class DownloadPage(Page):
 
         body = ttk.Frame(self)
         body.pack(fill="both", expand=True)
-        left = self.card(body, pad=6)
-        left.pack(side="left", fill="both", expand=True)
-        frame, self.tree = make_tree(left, ("id", "type", "time", "state"), ("版本", "类型", "发布时间", "状态"),
-                                     (240, 110, 140, 100))
+        panel = self.card(body, pad=18)
+        panel.configure(width=px(360))
+        panel.pack(side="right", fill="y", padx=(px(14), 0))
+        panel.pack_propagate(False)
+        self.left = self.card(body, pad=6)
+        self.left.pack(side="left", fill="both", expand=True)
+        frame, self.tree = make_tree(self.left, ("id", "type", "time", "state"), ("版本", "类型", "发布时间", "状态"),
+                                     (200, 90, 120, 110))
         frame.pack(fill="both", expand=True)
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
 
-        panel = self.card(body, pad=20)
-        panel.configure(width=px(310))
-        panel.pack(side="right", fill="y", padx=(px(14), 0))
-        panel.pack_propagate(False)
         ttk.Label(panel, text="已选择", style="CardSub.TLabel").pack(anchor="w")
         self.lbl_sel = ttk.Label(panel, text="还没选版本", style="CardBig.TLabel")
         self.lbl_sel.pack(anchor="w")
         self.lbl_sel_sub = ttk.Label(panel, text="在左边列表里点一个版本", style="CardSub.TLabel")
-        self.lbl_sel_sub.pack(anchor="w", pady=(0, px(14)))
-        ttk.Separator(panel).pack(fill="x", pady=(0, px(14)))
-        ttk.Label(panel, text="Mod 加载器", style="Card.TLabel").pack(anchor="w")
-        self.cb_loader = ttk.Combobox(panel, state="readonly", values=[n for n, _ in INSTALL_LOADERS])
-        self.cb_loader.current(0)
-        self.cb_loader.pack(fill="x", pady=(px(4), px(12)))
-        self.cb_loader.bind("<<ComboboxSelected>>", lambda e: self._load_loader())
-        self.lbl_lv = ttk.Label(panel, text="加载器版本", style="Card.TLabel")
-        self.lbl_lv.pack(anchor="w")
-        self.cb_lv = ttk.Combobox(panel, state="disabled")
-        self.cb_lv.pack(fill="x", pady=(px(4), px(20)))
+        self.lbl_sel_sub.pack(anchor="w", pady=(0, px(10)))
+        ttk.Separator(panel).pack(fill="x", pady=(0, px(10)))
+        ttk.Label(panel, text="模组加载器（可多选）", style="Card.TLabel").pack(anchor="w", pady=(0, px(4)))
+        self.picker = LoaderPicker(panel, self.app, self._loaders_changed)
+        self.picker.pack(fill="x")
+        ttk.Label(panel, text="版本名称", style="Card.TLabel").pack(anchor="w", pady=(px(12), px(4)))
+        self.var_name = tk.StringVar()
+        ttk.Entry(panel, textvariable=self.var_name).pack(fill="x")
         self.btn_install = ttk.Button(panel, text="安装", style="Big.Accent.TButton", command=self.install)
-        self.btn_install.pack(fill="x")
+        self.btn_install.pack(fill="x", pady=(px(14), 0))
         self.bar = ttk.Progressbar(panel, mode="determinate")
-        self.bar.pack(fill="x", pady=(px(18), px(6)))
+        self.bar.pack(fill="x", pady=(px(12), px(6)))
         self.lbl_status = ttk.Label(panel, text="", style="CardSub.TLabel", wraplength=px(230), justify="left")
         self.lbl_status.pack(anchor="w", fill="x")
         self.lbl_status.bind("<Configure>", lambda e: self.lbl_status.configure(wraplength=max(e.width, 100)))
@@ -1061,14 +1468,17 @@ class DownloadPage(Page):
 
     def load(self, force=False):
         self.lbl_status.configure(text="正在获取版本列表……")
+        overlay_once(self, "_ov", self.left, self.T, "正在获取版本列表…", inset=6)
 
         def ok(m):
+            close_overlay(self, "_ov")
             latest = m.get("latest", {})
             self.lbl_status.configure(text=f"最新正式版 {latest.get('release')}，最新快照 {latest.get('snapshot')}")
             self.fill()
 
         def err(e):
-            self.lbl_status.configure(text=f"获取版本列表失败：{e}")
+            self._ov.show_message(f"获取版本列表失败：{e}")
+            self.lbl_status.configure(text="获取版本列表失败，点「刷新列表」重试")
         self.app.get_manifest(ok, err, force)
 
     def fill(self):
@@ -1078,7 +1488,7 @@ class DownloadPage(Page):
         kw = self.var_filter.get().strip().lower()
         show_old = self.var_types["old_beta"].get()
         self.tree.delete(*self.tree.get_children())
-        installed = set(self.app.gd.list_versions())
+        installed = {self.app.gd.instance_info(v)["game"] for v in self.app.gd.list_versions()}
         for v in m["versions"]:
             t = v["type"]
             if t.startswith("old_"):
@@ -1104,39 +1514,15 @@ class DownloadPage(Page):
         v = next((x for x in self.app.manifest["versions"] if x["id"] == self.selected), {})
         self.lbl_sel.configure(text=self.selected)
         self.lbl_sel_sub.configure(text=f"{TYPE_NAMES.get(v.get('type'), '')} · 发布于 {v.get('releaseTime', '')[:10]}")
-        self._load_loader()
+        self.picker.set_game(self.selected)
+        self._loaders_changed()
 
-    def _load_loader(self):
-        name, kind = INSTALL_LOADERS[self.cb_loader.current()]
-        self._token += 1
-        token = self._token
-        self._loader_list = []
-        self.lbl_lv.configure(text=f"{name} 版本" if kind else "加载器版本")
-        if not kind or not self.selected:
-            self.cb_lv.configure(state="disabled")
-            self.cb_lv.set("")
-            return
-        gv = self.selected
-        self.cb_lv.configure(state="disabled")
-        self.cb_lv.set("加载中……")
-        stable_word = "推荐" if kind == "forge" else "稳定"
-
-        def ok(lst):
-            if token != self._token:
-                return
-            self._loader_list = lst
-            if not lst:
-                self.cb_lv.set(f"{gv} 没有可用的 {name}")
-                return
-            self.cb_lv.configure(state="readonly",
-                                 values=[f"{x['version']}{f'（{stable_word}）' if x['stable'] else ''}" for x in lst])
-            self.cb_lv.current(next((i for i, x in enumerate(lst) if x["stable"]), 0))
-
-        def err(e):
-            if token == self._token:
-                self.cb_lv.set("获取失败")
-                self.lbl_status.configure(text=f"获取 {name} 版本失败：{e}")
-        self.app.bg(lambda: game.loader_versions(kind, gv), ok, err)
+    def _loaders_changed(self):
+        # 用户没手动改过名字，就跟着选择自动更新
+        name = default_instance_name(self.selected, self.picker.selection())
+        if self.var_name.get() in ("", self._auto_name):
+            self.var_name.set(name)
+        self._auto_name = name
 
     def _progress(self, text, done, total):
         self.bar.configure(maximum=max(total, 1), value=done)
@@ -1146,22 +1532,9 @@ class DownloadPage(Page):
         if not self.selected:
             self.app.toast("先在左边选一个版本喵", "info")
             return
-        gv = self.selected
+        gv, sel, name = self.selected, self.picker.selection(), self.var_name.get().strip()
         gd, manifest = self.app.gd, self.app.manifest
         progress = self.app.progress_cb(self._progress)
-        name, kind = INSTALL_LOADERS[self.cb_loader.current()]
-        if kind:
-            i = self.cb_lv.current()
-            if i < 0 or not self._loader_list:
-                self.app.toast(f"请先选择 {name} 版本", "info")
-                return
-            lv = self._loader_list[i]["version"]
-            if kind == "fabric":
-                work = lambda: gd.install_fabric(gv, lv, progress, manifest)
-            else:
-                work = lambda: gd.install_forge(kind, gv, lv, progress, manifest)
-        else:
-            work = lambda: gd.install_vanilla(gv, progress, manifest)
         self.btn_install.state(["disabled"])
         self.btn_install.configure(text="安装中…")
 
@@ -1177,15 +1550,20 @@ class DownloadPage(Page):
             self.btn_install.configure(text="安装")
             self.lbl_status.configure(text=f"安装失败：{e}")
             self.app.error(e)
-        self.app.bg(work, ok, err)
+        self.app.bg(lambda: gd.install_instance(name, gv, sel, progress, manifest, replace=(name == gv)), ok, err)
 
 
-# ====================================================================== 下载 Mod
+# ====================================================================== 资源下载
+
+RES_TYPES = [("mod", "Mod"), ("shader", "光影"), ("resourcepack", "资源包")]
+RES_NAMES = dict(RES_TYPES)
+
 
 class ModPage(Page):
     def build(self):
         px = self.px
-        self.header("下载 Mod", "数据来自 Modrinth，用英文名搜索效果最好（如 sodium、jei），会自动下载前置")
+        self.header("下载资源", "Mod、光影、资源包，数据来自 Modrinth；用英文名搜索效果最好（如 sodium、iris、faithful）")
+        self.kind = "mod"
         self.page = 0
         self.total = 0
         self.hits = {}
@@ -1196,6 +1574,8 @@ class ModPage(Page):
         top = self.card(pad=14)
         top.pack(fill="x", pady=(0, px(14)))
         r = self.row(top)
+        self.seg = Segmented(r, RES_TYPES, self._set_kind)
+        self.seg.pack(side="left", padx=(0, px(12)))
         if self.T.icon_family:
             ttk.Label(r, text=self.T.icon("search"), style="CardIcon.TLabel").pack(side="left", padx=(px(4), px(8)))
         self.var_q = tk.StringVar()
@@ -1206,18 +1586,21 @@ class ModPage(Page):
             side="left", padx=(px(10), 0))
         r = self.row(top, pady=(px(12), 0))
 
-        def field(text, widget):
-            ttk.Label(r, text=text, style="CardSub.TLabel").pack(side="left", padx=(0, px(6)))
+        def field(parent, text, widget):
+            ttk.Label(parent, text=text, style="CardSub.TLabel").pack(side="left", padx=(0, px(6)))
             widget.pack(side="left", padx=(0, px(18)))
             return widget
         self.var_inst = tk.StringVar()
-        self.cb_inst = field("安装到", ttk.Combobox(r, textvariable=self.var_inst, state="readonly", width=28))
+        self.cb_inst = field(r, "安装到", ttk.Combobox(r, textvariable=self.var_inst, state="readonly", width=28))
         self.cb_inst.bind("<<ComboboxSelected>>", lambda ev: self._sync_filters())
         self.var_gv = tk.StringVar()
-        field("游戏版本", ttk.Combobox(r, textvariable=self.var_gv, width=9))
-        self.cb_loader = field("加载器", ttk.Combobox(r, state="readonly", width=9, values=[n for n, _ in LOADERS]))
+        field(r, "游戏版本", ttk.Combobox(r, textvariable=self.var_gv, width=9))
+        self.loader_box = ttk.Frame(r, style="Surface.TFrame")
+        self.loader_box.pack(side="left")
+        self.cb_loader = field(self.loader_box, "加载器",
+                               ttk.Combobox(self.loader_box, state="readonly", width=9, values=[n for n, _ in LOADERS]))
         self.cb_loader.current(0)
-        self.cb_sort = field("排序", ttk.Combobox(r, state="readonly", width=8, values=[n for n, _ in SORTS]))
+        self.cb_sort = field(r, "排序", ttk.Combobox(r, state="readonly", width=8, values=[n for n, _ in SORTS]))
         self.cb_sort.current(0)
         self.cb_sort.bind("<<ComboboxSelected>>", lambda ev: self.search(0))
 
@@ -1235,30 +1618,33 @@ class ModPage(Page):
 
         pane = ttk.Panedwindow(self, orient="horizontal")
         pane.pack(fill="both", expand=True)
-        left = self.card(pane, pad=6)
-        frame, self.tree = make_tree(left, ("title", "author", "dl", "desc"),
+        self.left = self.card(pane, pad=6)
+        frame, self.tree = make_tree(self.left, ("title", "author", "dl", "desc"),
                                      ("名称", "作者", "下载量", "简介"), (190, 100, 80, 300))
         frame.pack(fill="both", expand=True)
         self.tree.bind("<<TreeviewSelect>>", self._on_pick)
-        pane.add(left, weight=3)
+        pane.add(self.left, weight=3)
 
         right = self.card(pane, pad=16)
         pane.add(right, weight=2)
         self.lbl_title = ttk.Label(right, text="选择一个 Mod", style="CardBig.TLabel")
         self.lbl_title.pack(anchor="w")
-        self.lbl_meta = ttk.Label(right, text="在左边列表里点一个 Mod 查看可用版本", style="CardSub.TLabel")
+        self.lbl_meta = ttk.Label(right, text="在左边列表里点一个查看可用版本", style="CardSub.TLabel")
         self.lbl_meta.pack(anchor="w")
         self.lbl_desc = ttk.Label(right, text="", style="Card.TLabel", justify="left")
         self.lbl_desc.pack(anchor="w", fill="x", pady=(px(8), px(10)))
         right.bind("<Configure>", lambda ev: self.lbl_desc.configure(wraplength=max(ev.width - px(36), 100)))
         r = ttk.Frame(right, style="Surface.TFrame")
         r.pack(side="bottom", fill="x", pady=(px(12), 0))
-        vframe, self.vtree = make_tree(right, ("name", "gv", "loader", "date"),
+        self.vbox = ttk.Frame(right, style="Surface.TFrame")
+        self.vbox.pack(fill="both", expand=True)
+        vframe, self.vtree = make_tree(self.vbox, ("name", "gv", "loader", "date"),
                                        ("版本", "游戏版本", "加载器", "日期"), (200, 110, 90, 90), height=6)
         vframe.pack(fill="both", expand=True)
         self.vtree.bind("<Double-1>", lambda e: self.download())
         self.var_deps = tk.BooleanVar(value=True)
-        ttk.Checkbutton(r, text="同时下载必需前置", variable=self.var_deps, style="Card.TCheckbutton").pack(side="left")
+        self.chk_deps = ttk.Checkbutton(r, text="同时下载必需前置", variable=self.var_deps, style="Card.TCheckbutton")
+        self.chk_deps.pack(side="left")
         self.btn_dl = ttk.Button(r, text="下载所选版本", style="Accent.TButton", command=self.download)
         self.btn_dl.pack(side="right")
         ttk.Button(r, text="网页", style="Ghost.TButton", command=self._open_web).pack(side="right", padx=px(4))
@@ -1270,6 +1656,20 @@ class ModPage(Page):
         if not self._searched:
             self._searched = True
             self.search(0)
+
+    def _set_kind(self, kind):
+        self.kind = kind
+        if kind == "mod":
+            self.loader_box.pack(side="left", before=self.cb_sort.master.winfo_children()[-2])
+            self.chk_deps.pack(side="left")
+        else:
+            self.loader_box.pack_forget()
+            self.chk_deps.pack_forget()
+        self.lbl_title.configure(text=f"选择一个{RES_NAMES[kind]}")
+        self.lbl_meta.configure(text="在左边列表里点一个查看可用版本")
+        self.lbl_desc.configure(text="")
+        self.vtree.delete(*self.vtree.get_children())
+        self.search(0)
 
     def refresh_versions(self, select=None):
         vs = self.app.gd.list_versions()
@@ -1286,15 +1686,16 @@ class ModPage(Page):
         if not vid:
             return
         gd = self.app.gd
-        self.var_gv.set(gd.game_version_of(vid))
+        self.var_gv.set(gd.instance_info(vid)["game"])
         loader = gd.loader_of(vid)
         codes = [c for _, c in LOADERS]
         self.cb_loader.current(codes.index(loader) if loader in codes else 0)
-        if not loader:
-            self.lbl_status.configure(text=f"提示：{vid} 是原版，没装加载器的话 Mod 不会生效哦")
+        if not loader and self.kind == "mod":
+            self.lbl_status.configure(text=f"提示：{vid} 没装 Mod 加载器，Mod 不会生效哦")
 
     def _filters(self):
-        return self.var_gv.get().strip() or None, LOADERS[self.cb_loader.current()][1] or None
+        loader = LOADERS[self.cb_loader.current()][1] or None if self.kind == "mod" else None
+        return self.var_gv.get().strip() or None, loader
 
     def search(self, page):
         if page < 0:
@@ -1302,13 +1703,16 @@ class ModPage(Page):
         gv, loader = self._filters()
         q = self.var_q.get().strip()
         sort = SORTS[self.cb_sort.current()][1]
+        kind = self.kind
         self._search_token += 1
         token = self._search_token
-        self.lbl_status.configure(text="搜索中……")
+        self.lbl_status.configure(text="")
+        overlay_once(self, "_ov", self.left, self.T, f"正在搜索{RES_NAMES[kind]}…", inset=6)
 
         def ok(res):
             if token != self._search_token:
                 return
+            close_overlay(self, "_ov")
             self.page = page
             self.total = res.get("total_hits", 0)
             self.hits = {h["project_id"]: h for h in res["hits"]}
@@ -1321,12 +1725,14 @@ class ModPage(Page):
             self.lbl_page.configure(text=f"第 {page + 1} / {pages} 页 · 共 {self.total} 个")
             self.btn_prev.state(["!disabled"] if page > 0 else ["disabled"])
             self.btn_next.state(["!disabled"] if page + 1 < pages else ["disabled"])
-            self.lbl_status.configure(text="" if self.total else "什么都没搜到喵，换个关键词或放宽筛选试试")
+            if not self.total:
+                overlay_once(self, "_ov", self.left, self.T, "", inset=6).show_message(
+                    "什么都没搜到喵，换个关键词或放宽筛选试试")
 
         def err(e):
             if token == self._search_token:
-                self.lbl_status.configure(text=f"搜索失败：{e}")
-        self.app.bg(lambda: mods.search(q, gv, loader, sort, page * mods.PAGE_SIZE), ok, err)
+                self._ov.show_message(f"搜索失败：{e}")
+        self.app.bg(lambda: mods.search(q, gv, loader, sort, page * mods.PAGE_SIZE, project_type=kind), ok, err)
 
     def _on_pick(self, _):
         sel = self.tree.selection()
@@ -1341,11 +1747,12 @@ class ModPage(Page):
         self._ver_token += 1
         token = self._ver_token
         self.vtree.delete(*self.vtree.get_children())
-        self.lbl_status.configure(text="获取版本列表……")
+        overlay_once(self, "_vov", self.vbox, self.T, "正在获取版本…")
 
         def ok(vs):
             if token != self._ver_token:
                 return
+            close_overlay(self, "_vov")
             self.versions = {v["id"]: v for v in vs}
             for v in vs:
                 gvs = v.get("game_versions", [])
@@ -1358,18 +1765,19 @@ class ModPage(Page):
                 self.vtree.selection_set(vs[0]["id"])
                 self.lbl_status.configure(text=f"找到 {len(vs)} 个版本，双击即可安装")
             else:
-                self.lbl_status.configure(text=f"没有适配 {gv or '任意版本'} / {loader or '任意加载器'} 的版本")
+                overlay_once(self, "_vov", self.vbox, self.T, "").show_message(
+                    f"没有适配 {gv or '任意版本'}{' / ' + loader if loader else ''} 的版本")
 
         def err(e):
             if token == self._ver_token:
-                self.lbl_status.configure(text=f"获取版本失败：{e}")
+                self._vov.show_message(f"获取版本失败：{e}")
         self.app.bg(lambda: mods.project_versions(pid, gv, loader), ok, err)
 
     def _open_web(self):
         sel = self.tree.selection()
         if sel:
             h = self.hits.get(sel[0], {})
-            webbrowser.open(f"https://modrinth.com/mod/{h.get('slug') or sel[0]}")
+            webbrowser.open(f"https://modrinth.com/{self.kind}/{h.get('slug') or sel[0]}")
 
     def download(self):
         inst = self.var_inst.get()
@@ -1378,12 +1786,13 @@ class ModPage(Page):
             return
         sel = self.vtree.selection()
         if not sel:
-            self.app.toast("请先在右侧选择一个 Mod 版本", "info")
+            self.app.toast("请先在右侧选择一个版本", "info")
             return
         v = self.versions[sel[0]]
         gv, loader = self._filters()
-        mods_dir = self.app.gd.mods_dir(inst)
-        deps = self.var_deps.get()
+        kind = self.kind
+        target = os.path.join(self.app.gd.version_dir(inst), mods.FOLDERS[kind])
+        deps = self.var_deps.get() and kind == "mod"
         log = lambda s: self.app.ui(self.lbl_status.configure, {"text": s})
         self.btn_dl.state(["disabled"])
 
@@ -1392,32 +1801,40 @@ class ModPage(Page):
             new = sum(1 for _, n in result if n)
             self.lbl_status.configure(text="、".join(n for n, _ in result))
             self.app.toast(f"已安装到 {inst}：新下载 {new} 个，共 {len(result)} 个文件")
+            if kind == "shader":
+                loaders = self.app.gd.instance_info(inst)["loaders"]
+                if not ({"optifine", "fabric", "quilt", "neoforge"} & set(loaders)):
+                    messagebox.showinfo("光影还用不了", f"{inst} 没有装 OptiFine 或 Iris 这类光影加载器，光影不会生效。\n"
+                                        "可以在「启动游戏 → 管理」里加装 OptiFine，或者装 Fabric 后下载 Iris。")
 
         def err(e):
             self.btn_dl.state(["!disabled"])
             self.lbl_status.configure(text=f"下载失败：{e}")
             self.app.error(e)
-        self.app.bg(lambda: mods.install(v, mods_dir, gv, loader, deps, log), ok, err)
+        self.app.bg(lambda: mods.install(v, target, gv, loader, deps, log), ok, err)
 
 
-# ====================================================================== Mod 管理
+# ====================================================================== 资源管理
 
 class ModManagePage(Page):
     def build(self):
         px = self.px
-        self.header("Mod 管理", "查看、启用 / 禁用、删除某个版本里已安装的 Mod")
+        self.header("资源管理", "查看、启用 / 禁用、删除某个版本里的 Mod、光影和资源包，也可以从本机添加")
+        self.kind = "mod"
         bar = self.card(pad=12)
         bar.pack(fill="x", pady=(0, px(14)))
         r = self.row(bar)
-        ttk.Label(r, text="版本", style="CardSub.TLabel").pack(side="left", padx=(px(4), px(8)))
+        self.seg = Segmented(r, RES_TYPES, self._set_kind)
+        self.seg.pack(side="left", padx=(0, px(14)))
         self.var_inst = tk.StringVar()
-        self.cb = ttk.Combobox(r, textvariable=self.var_inst, state="readonly", width=34)
+        self.cb = ttk.Combobox(r, textvariable=self.var_inst, state="readonly", width=26)
         self.cb.pack(side="left")
         self.cb.bind("<<ComboboxSelected>>", lambda e: self.fill())
-        ttk.Button(r, text="打开 mods 文件夹", command=self.open).pack(side="right")
-        ttk.Button(r, text="删除", style="Danger.TButton", command=self.delete).pack(side="right", padx=px(6))
-        ttk.Button(r, text="启用 / 禁用", command=self.toggle).pack(side="right")
-        ttk.Button(r, text="刷新", command=self.fill).pack(side="right", padx=px(6))
+        ttk.Button(r, text="打开文件夹", command=self.open).pack(side="right")
+        ttk.Button(r, text="从本机添加…", command=self.add_local).pack(side="right", padx=px(6))
+        ttk.Button(r, text="删除", style="Danger.TButton", command=self.delete).pack(side="right")
+        self.btn_toggle = ttk.Button(r, text="启用 / 禁用", command=self.toggle)
+        self.btn_toggle.pack(side="right", padx=px(6))
 
         box = self.card(pad=6)
         box.pack(fill="both", expand=True)
@@ -1432,6 +1849,11 @@ class ModManagePage(Page):
     def on_show(self):
         self.fill()
 
+    def _set_kind(self, kind):
+        self.kind = kind
+        self.btn_toggle.state(["!disabled"] if kind == "mod" else ["disabled"])
+        self.fill()
+
     def refresh_versions(self, select=None):
         vs = self.app.gd.list_versions()
         self.cb["values"] = vs
@@ -1441,25 +1863,40 @@ class ModManagePage(Page):
 
     def _dir(self):
         vid = self.var_inst.get()
-        return self.app.gd.mods_dir(vid) if vid else None
+        return os.path.join(self.app.gd.version_dir(vid), mods.FOLDERS[self.kind]) if vid else None
+
+    def _items(self, d):
+        if self.kind == "mod":
+            return sorted(f for f in os.listdir(d) if f.endswith((".jar", ".jar.disabled")))
+        return sorted(f for f in os.listdir(d) if f.lower().endswith(".zip") or os.path.isdir(os.path.join(d, f)))
 
     def fill(self):
         self.tree.delete(*self.tree.get_children())
         d = self._dir()
-        if not d or not os.path.isdir(d):
-            self.lbl.configure(text="这个版本还没有 Mod，去「下载 Mod」挑几个吧")
+        what = RES_NAMES[self.kind]
+        if not d or not os.path.isdir(d) or not self._items(d):
+            self.lbl.configure(text=f"这个版本还没有{what}，可以去「下载资源」挑，或者点「从本机添加…」")
             return
-        files = sorted(f for f in os.listdir(d) if f.endswith((".jar", ".jar.disabled")))
+        files = self._items(d)
         for f in files:
-            on = f.endswith(".jar")
-            self.tree.insert("", "end", iid=f, tags=() if on else ("muted",), values=(
-                f.removesuffix(".disabled"), "● 已启用" if on else "○ 已禁用",
-                fmt_size(os.path.getsize(os.path.join(d, f)))))
+            path = os.path.join(d, f)
+            if self.kind == "mod":
+                on = f.endswith(".jar")
+                state, tags = ("● 已启用", ()) if on else ("○ 已禁用", ("muted",))
+            else:
+                state, tags = ("文件夹" if os.path.isdir(path) else "压缩包"), ()
+            size = "" if os.path.isdir(path) else fmt_size(os.path.getsize(path))
+            self.tree.insert("", "end", iid=f, tags=tags, values=(f.removesuffix(".disabled"), state, size))
         restripe(self.tree)
-        enabled = sum(f.endswith(".jar") for f in files)
-        self.lbl.configure(text=f"共 {len(files)} 个 Mod，已启用 {enabled} 个 · 双击切换启用状态，可按住 Ctrl 多选")
+        if self.kind == "mod":
+            enabled = sum(f.endswith(".jar") for f in files)
+            self.lbl.configure(text=f"共 {len(files)} 个 Mod，已启用 {enabled} 个 · 双击切换启用状态，可按住 Ctrl 多选")
+        else:
+            self.lbl.configure(text=f"共 {len(files)} 个{what} · 在游戏的「选项」里启用")
 
     def toggle(self):
+        if self.kind != "mod":
+            return
         d = self._dir()
         for f in self.tree.selection():
             src = os.path.join(d, f)
@@ -1469,11 +1906,28 @@ class ModManagePage(Page):
 
     def delete(self):
         sel = self.tree.selection()
-        if sel and messagebox.askyesno("删除 Mod", f"确定删除选中的 {len(sel)} 个 Mod 吗？"):
+        if sel and messagebox.askyesno("删除", f"确定删除选中的 {len(sel)} 个{RES_NAMES[self.kind]}吗？"):
             for f in sel:
-                os.remove(os.path.join(self._dir(), f))
+                path = os.path.join(self._dir(), f)
+                shutil.rmtree(path) if os.path.isdir(path) else os.remove(path)
             self.fill()
-            self.app.toast(f"已删除 {len(sel)} 个 Mod")
+            self.app.toast(f"已删除 {len(sel)} 个{RES_NAMES[self.kind]}")
+
+    def add_local(self):
+        d = self._dir()
+        if not d:
+            self.app.toast("先安装一个游戏版本喵", "info")
+            return
+        ft = [("Mod", "*.jar")] if self.kind == "mod" else [("压缩包", "*.zip")]
+        paths = filedialog.askopenfilenames(title=f"选择要添加的{RES_NAMES[self.kind]}",
+                                            filetypes=ft + [("所有文件", "*.*")])
+        if not paths:
+            return
+        os.makedirs(d, exist_ok=True)
+        for p in paths:
+            shutil.copy2(p, os.path.join(d, os.path.basename(p)))
+        self.fill()
+        self.app.toast(f"已添加 {len(paths)} 个{RES_NAMES[self.kind]}到 {self.var_inst.get()}")
 
     def open(self):
         d = self._dir()

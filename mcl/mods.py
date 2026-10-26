@@ -14,9 +14,14 @@ def _get(path, **params):
     return net.fetch_json(f"{API}{path}" + (f"?{q}" if q else ""))
 
 
-def search(query="", game_version=None, loader=None, sort="relevance", offset=0, limit=PAGE_SIZE):
-    """返回 {'hits': [...], 'total_hits': n, 'offset': n}"""
-    facets = [["project_type:mod"]]
+# 资源类型 -> 实例目录下的文件夹
+FOLDERS = {"mod": "mods", "shader": "shaderpacks", "resourcepack": "resourcepacks"}
+
+
+def search(query="", game_version=None, loader=None, sort="relevance", offset=0, limit=PAGE_SIZE,
+           project_type="mod"):
+    """返回 {'hits': [...], 'total_hits': n, 'offset': n}；project_type: mod / shader / resourcepack"""
+    facets = [[f"project_type:{project_type}"]]
     if game_version:
         facets.append([f"versions:{game_version}"])
     if loader:
@@ -62,7 +67,10 @@ def installed_project_ids(mods_dir):
 
 
 def install(version, mods_dir, game_version=None, loader=None, with_deps=True, log=None):
-    """下载一个 Mod 版本，可选递归下载必需前置。返回 [(文件名, 是否新下载)]。"""
+    """下载一个版本到 mods_dir（光影、资源包也用它，传对应文件夹并关掉前置即可）。
+
+    可选递归下载必需前置。返回 [(文件名, 是否新下载)]。
+    """
     log = log or (lambda s: None)
     seen = {version["project_id"]}
     if with_deps:
