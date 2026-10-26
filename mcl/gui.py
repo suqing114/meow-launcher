@@ -1,6 +1,7 @@
 """tkinter 图形界面。"""
 import json
 import locale
+import math
 import os
 import queue
 import re
@@ -11,18 +12,17 @@ import time
 import traceback
 import webbrowser
 import tkinter as tk
-import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-from . import __version__, auth, game, java, mods, net
+from . import __version__, auth, game, java, mods, net, theme
+from .theme import (ACCENT, ACCENT2, BG, CARD, DANGER, FAMILY, FG, LOG_BG, LOG_FG, MONO, MUTED,
+                    SIDEBAR, SIDEBAR_ACTIVE, SIDEBAR_HOVER, SIDEBAR_TEXT, SUB, SUCCESS)
 
 IS_WINDOWS = sys.platform.startswith("win")
 APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
-FAMILY = "Microsoft YaHei UI" if IS_WINDOWS else "TkDefaultFont"
-
-BG, CARD, ACCENT, ACCENT_DARK = "#f3f5fa", "#ffffff", "#5b6ee1", "#4757c9"
-FG, SUB, SIDEBAR, SIDEBAR_HI = "#1f2333", "#6b7280", "#23263a", "#34385a"
+ACCOUNTS_PATH = os.path.join(APP_DIR, "accounts.json")
+REPO_URL = "https://github.com/suqing114/meow-launcher"
 
 DEFAULTS = {
     "game_dir": os.path.join(APP_DIR, ".minecraft"),
@@ -38,7 +38,6 @@ DEFAULTS = {
     "account": "",
     "ms_client_id": auth.DEFAULT_CLIENT_ID,
 }
-ACCOUNTS_PATH = os.path.join(APP_DIR, "accounts.json")
 
 SOURCES = [("BMCLAPI 镜像（国内推荐）", "bmclapi"), ("官方源", "official")]
 LOADERS = [("任意", ""), ("Fabric", "fabric"), ("Forge", "forge"), ("NeoForge", "neoforge"), ("Quilt", "quilt")]
@@ -46,6 +45,7 @@ INSTALL_LOADERS = [("原版（不装加载器）", ""), ("Fabric", "fabric"), ("
 SORTS = [("相关度", "relevance"), ("下载量", "downloads"), ("关注数", "follows"),
          ("最新发布", "newest"), ("最近更新", "updated")]
 TYPE_NAMES = {"release": "正式版", "snapshot": "快照", "old_beta": "远古 Beta", "old_alpha": "远古 Alpha"}
+LOADER_NAMES = {"fabric": "Fabric", "forge": "Forge", "neoforge": "NeoForge", "quilt": "Quilt"}
 
 
 def load_config():
@@ -96,6 +96,11 @@ def decode_line(raw):
         return raw.decode(locale.getpreferredencoding(False), "replace")
 
 
+def lerp_color(a, b, t):
+    ca, cb = theme._rgb(a), theme._rgb(b)
+    return "#%02x%02x%02x" % tuple(int(x + (y - x) * t) for x, y in zip(ca, cb))
+
+
 class Log4jXml:
     """把游戏 log4j XMLLayout 的输出还原成普通的一行行日志。"""
     _EVENT = re.compile(r'<log4j:Event logger="[^"]*" timestamp="(\d+)" level="(\w+)" thread="([^"]*)"')
@@ -140,17 +145,78 @@ class Log4jXml:
         return out
 
 
-def scrolled_tree(parent, columns, headings, widths, height=12):
-    frame = ttk.Frame(parent)
-    tree = ttk.Treeview(frame, columns=columns, show="headings", height=height, selectmode="browse")
+# ---------------------------------------------------------------- 列表
+
+def make_tree(parent, columns, headings, widths, height=8, selectmode="browse"):
+    """白底列表 + 细滚动条，带斑马纹和悬停高亮（填充后调用 restripe）。"""
+    frame = ttk.Frame(parent, style="Surface.TFrame")
+    tree = ttk.Treeview(frame, columns=columns, show="headings", height=height, selectmode=selectmode)
     for c, h, w in zip(columns, headings, widths):
-        tree.heading(c, text=h)
-        tree.column(c, width=w, stretch=(w >= 200), anchor="w")
+        tree.heading(c, text=h, anchor="w")
+        tree.column(c, width=w, minwidth=40, stretch=(w >= 200), anchor="w")
     sb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
     tree.configure(yscrollcommand=sb.set)
     tree.pack(side="left", fill="both", expand=True)
     sb.pack(side="right", fill="y")
+    tree.tag_configure("odd", background="#fafbfe")
+    tree.tag_configure("hover", background=theme.HOVER)
+    tree.tag_configure("accent", foreground=ACCENT)
+    tree.tag_configure("muted", foreground=MUTED)
+    hovered = [None]
+
+    def set_hover(iid):
+        old = hovered[0]
+        if old == iid:
+            return
+        if old and tree.exists(old):
+            tree.item(old, tags=[t for t in tree.item(old, "tags") if t != "hover"])
+        if iid:
+            tree.item(iid, tags=list(tree.item(iid, "tags")) + ["hover"])
+        hovered[0] = iid
+    tree.bind("<Motion>", lambda e: set_hover(tree.identify_row(e.y) or None), add="+")
+    tree.bind("<Leave>", lambda e: set_hover(None), add="+")
     return frame, tree
+
+
+def restripe(tree):
+    for i, iid in enumerate(tree.get_children()):
+        tags = [t for t in tree.item(iid, "tags") if t not in ("odd", "hover")]
+        tree.item(iid, tags=tags + (["odd"] if i % 2 else []))
+
+
+# ---------------------------------------------------------------- 侧边栏
+
+class NavItem(tk.Frame):
+    def __init__(self, master, T, icon, text, command):
+        super().__init__(master, bg=SIDEBAR, cursor="hand2")
+        self.active = False
+        self.bar = tk.Frame(self, bg=SIDEBAR, width=T.px(3))
+        self.bar.pack(side="left", fill="y")
+        self.ic = tk.Label(self, text=T.icon(icon), font=T.icon_font(12), bg=SIDEBAR, fg=SIDEBAR_TEXT, width=2)
+        self.ic.pack(side="left", padx=(T.px(12), T.px(4)), pady=T.px(10))
+        self.lb = tk.Label(self, text=text, font=(FAMILY, 10), bg=SIDEBAR, fg=SIDEBAR_TEXT)
+        self.lb.pack(side="left")
+        for w in (self, self.bar, self.ic, self.lb):
+            w.bind("<Enter>", lambda e: self._paint(True))
+            w.bind("<Leave>", lambda e: self.after(10, self._check_leave))
+            w.bind("<Button-1>", lambda e: command())
+
+    def _check_leave(self):
+        under = self.winfo_containing(*self.winfo_pointerxy())
+        self._paint(under in (self, self.bar, self.ic, self.lb))
+
+    def set_active(self, on):
+        self.active = on
+        self._paint(False)
+
+    def _paint(self, hover):
+        bg = SIDEBAR_ACTIVE if self.active else (SIDEBAR_HOVER if hover else SIDEBAR)
+        fg = "#ffffff" if self.active else ("#e1e4f2" if hover else SIDEBAR_TEXT)
+        for w in (self, self.ic, self.lb):
+            w.configure(bg=bg)
+        self.lb.configure(fg=fg)
+        self.ic.configure(fg="#9fb0ff" if self.active else fg)
+        self.bar.configure(bg=ACCENT if self.active else bg)
 
 
 # ====================================================================== App
@@ -158,10 +224,12 @@ def scrolled_tree(parent, columns, headings, widths, height=12):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title(f"喵喵启动器 MeowLauncher {__version__}")
-        self.geometry("1100x700")
-        self.minsize(900, 580)
+        self.title("喵喵启动器 MeowLauncher")
+        self.geometry("1140x740")
+        self.minsize(980, 640)
         self.configure(bg=BG)
+        self.theme = T = theme.Theme(self)
+        self.iconphoto(True, T.keep("icon64", theme.cat_logo(64)), T.keep("icon32", theme.cat_logo(32)))
 
         self.cfg = load_config()
         net.set_source(self.cfg["source"])
@@ -175,73 +243,75 @@ class App(tk.Tk):
 
         self._q = queue.Queue()
         self.after(40, self._poll)
-        self._setup_style()
+        self._toast = None
 
-        sidebar = tk.Frame(self, bg=SIDEBAR, width=190)
-        sidebar.pack(side="left", fill="y")
-        sidebar.pack_propagate(False)
-        tk.Label(sidebar, text="=^･ω･^=", bg=SIDEBAR, fg="#ffd479",
-                 font=(FAMILY, 18, "bold")).pack(pady=(22, 0))
-        tk.Label(sidebar, text="喵喵启动器", bg=SIDEBAR, fg="white",
-                 font=(FAMILY, 14, "bold")).pack(pady=(2, 22))
+        px = T.px
+        side = tk.Frame(self, bg=SIDEBAR, width=px(212))
+        side.pack(side="left", fill="y")
+        side.pack_propagate(False)
+        brand = tk.Frame(side, bg=SIDEBAR)
+        brand.pack(fill="x", padx=px(20), pady=(px(24), px(28)))
+        tk.Label(brand, image=T.keep("logo", theme.cat_logo(px(42))), bg=SIDEBAR).pack(side="left")
+        names = tk.Frame(brand, bg=SIDEBAR)
+        names.pack(side="left", padx=(px(10), 0))
+        tk.Label(names, text="喵喵启动器", fg="#ffffff", bg=SIDEBAR, font=(FAMILY, 13, "bold")).pack(anchor="w")
+        tk.Label(names, text="MeowLauncher", fg=SIDEBAR_TEXT, bg=SIDEBAR, font=(FAMILY, 9)).pack(anchor="w")
 
-        content = ttk.Frame(self)
-        content.pack(side="left", fill="both", expand=True)
-        content.rowconfigure(0, weight=1)
-        content.columnconfigure(0, weight=1)
+        self.content = ttk.Frame(self)
+        self.content.pack(side="left", fill="both", expand=True)
+        self.content.rowconfigure(0, weight=1)
+        self.content.columnconfigure(0, weight=1)
 
         self.pages, self.nav = {}, {}
-        for key, text, cls in [("launch", "启动游戏", LaunchPage), ("download", "下载游戏", DownloadPage),
-                               ("mods", "下载 Mod", ModPage), ("manage", "Mod 管理", ModManagePage),
-                               ("settings", "设置", SettingsPage)]:
-            page = cls(content, self)
+        for key, text, icon, cls in [("launch", "启动游戏", "play", LaunchPage),
+                                     ("download", "下载游戏", "download", DownloadPage),
+                                     ("mods", "下载 Mod", "puzzle", ModPage),
+                                     ("manage", "Mod 管理", "library", ModManagePage),
+                                     ("settings", "设置", "settings", SettingsPage)]:
+            page = cls(self.content, self)
             page.grid(row=0, column=0, sticky="nsew")
             self.pages[key] = page
-            btn = tk.Label(sidebar, text="    " + text, anchor="w", bg=SIDEBAR, fg="#d6d9ea",
-                           font=(FAMILY, 11), padx=10, pady=10, cursor="hand2")
-            btn.pack(fill="x")
-            btn.bind("<Button-1>", lambda e, k=key: self.show(k))
-            self.nav[key] = btn
-        tk.Label(sidebar, text=f"v{__version__}", bg=SIDEBAR, fg="#6c7093",
-                 font=(FAMILY, 9)).pack(side="bottom", pady=10)
+            item = NavItem(side, T, icon, text, lambda k=key: self.show(k))
+            item.pack(fill="x", padx=px(12), pady=px(2))
+            self.nav[key] = item
+
+        foot = tk.Frame(side, bg=SIDEBAR)
+        foot.pack(side="bottom", fill="x", padx=px(22), pady=px(18))
+        gh = tk.Label(foot, text="GitHub ↗", fg=SIDEBAR_TEXT, bg=SIDEBAR, font=(FAMILY, 9), cursor="hand2")
+        gh.pack(side="left")
+        gh.bind("<Button-1>", lambda e: webbrowser.open(REPO_URL))
+        gh.bind("<Enter>", lambda e: gh.configure(fg="#ffffff"))
+        gh.bind("<Leave>", lambda e: gh.configure(fg=SIDEBAR_TEXT))
+        tk.Label(foot, text=f"v{__version__}", fg="#5d6283", bg=SIDEBAR, font=(FAMILY, 9)).pack(side="right")
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.show("launch")
+        theme.style_titlebar(self)
         self.scan_java()
-
-    def _setup_style(self):
-        base = tkfont.nametofont("TkDefaultFont")
-        base.configure(family=FAMILY, size=10)
-        for name in ("TkTextFont", "TkHeadingFont", "TkMenuFont"):
-            tkfont.nametofont(name).configure(family=FAMILY, size=10)
-        line = base.metrics("linespace")
-        s = ttk.Style(self)
-        s.theme_use("clam")
-        s.configure(".", background=BG, foreground=FG, font=(FAMILY, 10))
-        s.configure("TFrame", background=BG)
-        s.configure("Card.TFrame", background=CARD)
-        s.configure("TLabel", background=BG)
-        s.configure("Card.TLabel", background=CARD)
-        s.configure("H1.TLabel", font=(FAMILY, 17, "bold"))
-        s.configure("Sub.TLabel", foreground=SUB)
-        s.configure("CardSub.TLabel", foreground=SUB, background=CARD)
-        s.configure("TCheckbutton", background=BG)
-        s.configure("Card.TCheckbutton", background=CARD)
-        s.configure("TButton", padding=(10, 4))
-        s.configure("Accent.TButton", background=ACCENT, foreground="white",
-                    font=(FAMILY, 13, "bold"), padding=(26, 14), borderwidth=0)
-        s.map("Accent.TButton", background=[("disabled", "#aab2e6"), ("active", ACCENT_DARK)],
-              foreground=[("disabled", "#eef0fb")])
-        s.configure("Treeview", rowheight=int(line * 1.7), background=CARD, fieldbackground=CARD)
-        s.configure("Treeview.Heading", font=(FAMILY, 10, "bold"))
-        s.map("Treeview", background=[("selected", ACCENT)], foreground=[("selected", "white")])
-        s.configure("Horizontal.TProgressbar", background=ACCENT, troughcolor="#e3e6f2", borderwidth=0)
 
     def show(self, key):
         self.pages[key].tkraise()
-        for k, btn in self.nav.items():
-            btn.configure(bg=SIDEBAR_HI if k == key else SIDEBAR, fg="white" if k == key else "#d6d9ea")
+        for k, item in self.nav.items():
+            item.set_active(k == key)
         self.pages[key].on_show()
+
+    def toast(self, text, kind="success"):
+        """页面底部的小提示，几秒后自动消失。"""
+        T = self.theme
+        if self._toast:
+            self._toast.destroy()
+        color, icon = {"success": (SUCCESS, "check"), "error": (DANGER, "error"),
+                       "info": (ACCENT, "info")}[kind]
+        f = tk.Frame(self.content, bg="#23263a")
+        if T.icon_family:
+            tk.Label(f, text=T.icon(icon), font=T.icon_font(11), fg=color, bg="#23263a").pack(
+                side="left", padx=(T.px(16), 0), pady=T.px(11))
+        tk.Label(f, text=text, fg="#ffffff", bg="#23263a", font=(FAMILY, 10)).pack(
+            side="left", padx=T.px(12), pady=T.px(11))
+        f.place(relx=0.5, rely=1.0, anchor="s", y=-T.px(26))
+        f.lift()
+        self._toast = f
+        self.after(3200, lambda: f.winfo_exists() and f.destroy())
 
     # ---- 线程工具：后台线程只往队列里塞回调，由主线程执行
     def ui(self, fn, *args):
@@ -315,7 +385,9 @@ class App(tk.Tk):
 
 class Page(ttk.Frame):
     def __init__(self, master, app):
-        super().__init__(master, padding=(22, 18))
+        self.T = app.theme
+        self.px = app.theme.px
+        super().__init__(master, padding=(self.px(28), self.px(22)))
         self.app = app
         self.build()
 
@@ -329,82 +401,214 @@ class Page(ttk.Frame):
         pass
 
     def header(self, title, sub=""):
-        ttk.Label(self, text=title, style="H1.TLabel").pack(anchor="w")
-        ttk.Label(self, text=sub, style="Sub.TLabel").pack(anchor="w", pady=(2, 12))
+        h = ttk.Frame(self)
+        h.pack(fill="x", pady=(0, self.px(16)))
+        ttk.Label(h, text=title, style="H1.TLabel").pack(anchor="w")
+        if sub:
+            ttk.Label(h, text=sub, style="Sub.TLabel").pack(anchor="w", pady=(self.px(2), 0))
+        return h
+
+    def card(self, parent=None, pad=16):
+        return ttk.Frame(parent or self, style="Card.TFrame", padding=self.px(pad))
+
+    def card_title(self, parent, icon, text):
+        row = ttk.Frame(parent, style="Surface.TFrame")
+        if self.T.icon_family:
+            ttk.Label(row, text=self.T.icon(icon), style="CardIcon.TLabel").pack(side="left", padx=(0, self.px(8)))
+        ttk.Label(row, text=text, style="CardTitle.TLabel").pack(side="left")
+        return row
+
+    def row(self, parent, **pack):
+        r = ttk.Frame(parent, style="Surface.TFrame")
+        r.pack(fill="x", **pack)
+        return r
 
 
 # ====================================================================== 启动页
 
+class Banner(tk.Canvas):
+    """渐变横幅 + 大号启动按钮（画在 Canvas 上，圆角和半透明装饰都是生成的 PNG）。"""
+
+    def __init__(self, master, T, command):
+        self.T = T
+        px = T.px
+        self.h = px(170)
+        super().__init__(master, height=self.h, bg=BG, highlightthickness=0, bd=0)
+        self.command = command
+        self.enabled = True
+        self.hover = False
+        self.title = "欢迎回来"
+        self.sub = ""
+        self.btn_text = "启动游戏"
+        self.btn_sub = ""
+        self.bw, self.bh = px(206), px(64)
+        self.imgs = {k: T.keep(f"hero.{k}", theme.box(self.bw, self.bh, px(16), c))
+                     for k, c in (("n", "#ffffff"), ("h", "#eef0ff"), ("d", "#dfe3fa"))}
+        d1, d2 = px(260), px(150)
+        self.deco1 = T.keep("deco1", theme.Raster(d1, d1).paint(theme.circle(d1 / 2, d1 / 2, d1 / 2), "#ffffff", 0.09))
+        self.deco2 = T.keep("deco2", theme.Raster(d2, d2).paint(theme.circle(d2 / 2, d2 / 2, d2 / 2), "#ffffff", 0.07))
+        r = px(16)
+        self.corners = []
+        for cx, cy, anchor in ((r, r, "nw"), (0, r, "ne"), (r, 0, "sw"), (0, 0, "se")):
+            img = theme.Raster(r, r).paint(lambda x, y, cx=cx, cy=cy: r - math.hypot(x - cx, y - cy), BG)
+            self.corners.append((T.keep(f"corner.{anchor}", img), anchor))
+        self.bind("<Configure>", lambda e: self.redraw())
+        self.tag_bind("btn", "<Enter>", lambda e: self._set_hover(True))
+        self.tag_bind("btn", "<Leave>", lambda e: self._set_hover(False))
+        self.tag_bind("btn", "<Button-1>", lambda e: self.enabled and self.command())
+
+    def _set_hover(self, on):
+        self.hover = on
+        self.configure(cursor="hand2" if on and self.enabled else "")
+        self._draw_button()
+
+    def set_info(self, title=None, sub=None, btn_sub=None):
+        if title is not None:
+            self.title = title
+        if sub is not None:
+            self.sub = sub
+        if btn_sub is not None:
+            self.btn_sub = btn_sub
+        self.redraw()
+
+    def set_enabled(self, on, text="启动游戏"):
+        self.enabled, self.btn_text = on, text
+        self._draw_button()
+
+    def redraw(self):
+        px = self.T.px
+        self.delete("all")
+        w, h = max(self.winfo_width(), 10), self.h
+        step = 3
+        for x in range(0, w, step):
+            self.create_rectangle(x, 0, x + step, h, fill=lerp_color(ACCENT, ACCENT2, x / w), outline="")
+        self.create_image(w * 0.62, -px(120), image=self.deco1, anchor="nw")
+        self.create_image(w * 0.40, h * 0.55, image=self.deco2, anchor="nw")
+        self.create_text(px(32), px(54), anchor="w", text=self.title, fill="#ffffff", font=(FAMILY, 20, "bold"))
+        self.create_text(px(33), px(92), anchor="w", text=self.sub, fill="#e6e9ff", font=(FAMILY, 10))
+        self.create_text(px(33), px(126), anchor="w", text="=^･ω･^=  准备好冒险了吗？", fill="#cfd5ff",
+                         font=(FAMILY, 9))
+        for img, anchor in self.corners:
+            x = 0 if "w" in anchor else w
+            y = 0 if "n" in anchor else h
+            self.create_image(x, y, image=img, anchor=anchor)
+        self._draw_button()
+
+    def _draw_button(self):
+        px = self.T.px
+        self.delete("btn")
+        w = max(self.winfo_width(), 10)
+        x, y = w - px(36) - self.bw, (self.h - self.bh) / 2
+        key = "d" if not self.enabled else ("h" if self.hover else "n")
+        self.create_image(x, y, image=self.imgs[key], anchor="nw", tags="btn")
+        color = ACCENT if self.enabled else "#8f99d6"
+        cy = y + self.bh / 2
+        if self.T.icon_family:
+            self.create_text(x + px(30), cy, text=self.T.icon("play"), font=self.T.icon_font(17),
+                             fill=color, tags="btn")
+        self.create_text(x + px(54), cy - (px(9) if self.btn_sub else 0), anchor="w", text=self.btn_text,
+                         fill=color, font=(FAMILY, 13, "bold"), tags="btn")
+        if self.btn_sub:
+            self.create_text(x + px(55), cy + px(12), anchor="w", text=self.btn_sub[:24], fill=SUB,
+                             font=(FAMILY, 8), tags="btn")
+
+
 class LaunchPage(Page):
     def build(self):
         cfg = self.app.cfg
-        self.header("启动游戏", "选择一个已安装的版本，填个离线用户名就能开玩喵～")
+        px = self.px
+        self.banner = Banner(self, self.T, self.launch)
+        self.banner.pack(fill="x")
 
-        card = ttk.Frame(self, style="Card.TFrame", padding=16)
-        card.pack(fill="x")
-        card.columnconfigure(1, weight=1)
+        cards = ttk.Frame(self)
+        cards.pack(fill="x", pady=(px(16), 0))
+        for i in range(3):
+            cards.columnconfigure(i, weight=1, uniform="cards")
 
-        def label(r, t):
-            ttk.Label(card, text=t, style="Card.TLabel").grid(row=r, column=0, sticky="w", pady=5, padx=(0, 12))
-
-        label(0, "账户")
-        row = ttk.Frame(card, style="Card.TFrame")
-        row.grid(row=0, column=1, sticky="w")
-        self.cb_acc = ttk.Combobox(row, state="readonly", width=42)
-        self.cb_acc.pack(side="left")
-        ttk.Button(row, text="添加账户…", command=lambda: AddAccountDialog(self.app)).pack(side="left", padx=6)
-        ttk.Button(row, text="删除", command=self._remove_account).pack(side="left")
+        # 账户
+        c = self.card(cards)
+        c.grid(row=0, column=0, sticky="nsew", padx=(0, px(8)))
+        self.card_title(c, "person", "账户").pack(fill="x")
+        r = self.row(c, pady=(px(12), px(10)))
+        self.av = tk.Canvas(r, width=px(40), height=px(40), bg=CARD, highlightthickness=0, bd=0)
+        self.av.pack(side="left")
+        info = ttk.Frame(r, style="Surface.TFrame")
+        info.pack(side="left", padx=(px(10), 0))
+        self.lbl_acc_name = ttk.Label(info, text="", style="CardTitle.TLabel")
+        self.lbl_acc_name.pack(anchor="w")
+        self.lbl_acc_type = ttk.Label(info, text="", style="CardSub.TLabel")
+        self.lbl_acc_type.pack(anchor="w")
+        self.cb_acc = ttk.Combobox(c, state="readonly")
+        self.cb_acc.pack(fill="x")
+        self.cb_acc.bind("<<ComboboxSelected>>", lambda e: self._show_account())
+        r = self.row(c, pady=(px(10), 0))
+        ttk.Button(r, text="添加账户", command=lambda: AddAccountDialog(self.app)).pack(side="left")
+        ttk.Button(r, text="删除", style="Danger.TButton", command=self._remove_account).pack(side="left", padx=px(6))
         self._acc_ids = []
 
-        label(1, "游戏版本")
-        row = ttk.Frame(card, style="Card.TFrame")
-        row.grid(row=1, column=1, sticky="w")
+        # 游戏版本
+        c = self.card(cards)
+        c.grid(row=0, column=1, sticky="nsew", padx=px(8))
+        self.card_title(c, "library", "游戏版本").pack(fill="x")
         self.var_ver = tk.StringVar()
-        self.cb_ver = ttk.Combobox(row, textvariable=self.var_ver, state="readonly", width=42)
-        self.cb_ver.pack(side="left")
+        self.cb_ver = ttk.Combobox(c, textvariable=self.var_ver, state="readonly")
+        self.cb_ver.pack(fill="x", pady=(px(12), px(6)))
         self.cb_ver.bind("<<ComboboxSelected>>", lambda e: self._update_info())
-        ttk.Button(row, text="刷新", command=self.refresh_versions).pack(side="left", padx=6)
-        self.lbl_info = ttk.Label(row, text="", style="CardSub.TLabel")
-        self.lbl_info.pack(side="left", padx=6)
+        self.lbl_info = ttk.Label(c, text="", style="CardSub.TLabel")
+        self.lbl_info.pack(anchor="w", fill="x", pady=(0, px(8)))
+        r = self.row(c)
+        ttk.Button(r, text="版本文件夹", command=lambda: self._open("")).pack(side="left")
+        ttk.Button(r, text="mods", command=lambda: self._open("mods")).pack(side="left", padx=px(6))
+        ttk.Button(r, text="删除", style="Danger.TButton", command=self._delete).pack(side="left")
 
-        label(2, "最大内存（MB）")
+        # 运行设置
+        c = self.card(cards)
+        c.grid(row=0, column=2, sticky="nsew", padx=(px(8), 0))
+        self.card_title(c, "settings", "运行设置").pack(fill="x")
+        g = ttk.Frame(c, style="Surface.TFrame")
+        g.pack(fill="x", pady=(px(12), px(10)))
+        g.columnconfigure(1, weight=1)
+        ttk.Label(g, text="内存 MB", style="CardSub.TLabel").grid(row=0, column=0, sticky="w", padx=(0, px(10)))
         self.var_mem = tk.IntVar(value=cfg["memory"])
-        ttk.Spinbox(card, from_=512, to=65536, increment=512, textvariable=self.var_mem,
-                    width=10).grid(row=2, column=1, sticky="w")
-
-        label(3, "Java")
-        row = ttk.Frame(card, style="Card.TFrame")
-        row.grid(row=3, column=1, sticky="we")
+        ttk.Spinbox(g, from_=512, to=65536, increment=512, textvariable=self.var_mem,
+                    width=8).grid(row=0, column=1, sticky="w")
+        ttk.Label(g, text="Java", style="CardSub.TLabel").grid(row=1, column=0, sticky="w", pady=(px(8), 0))
         self.var_java = tk.StringVar()
-        self.cb_java = ttk.Combobox(row, textvariable=self.var_java, state="readonly", width=62)
-        self.cb_java.pack(side="left")
-        ttk.Button(row, text="重新扫描", command=self.app.scan_java).pack(side="left", padx=6)
-        ttk.Button(row, text="手动选择…", command=self._browse_java).pack(side="left")
+        self.cb_java = ttk.Combobox(g, textvariable=self.var_java, state="readonly", width=10)
+        self.cb_java.grid(row=1, column=1, sticky="we", pady=(px(8), 0))
+        r = self.row(c)
+        ttk.Button(r, text="重新扫描", command=self.app.scan_java).pack(side="left")
+        ttk.Button(r, text="手动选择…", command=self._browse_java).pack(side="left", padx=px(6))
 
-        self.btn_launch = ttk.Button(card, text="▶  启动游戏", style="Accent.TButton", command=self.launch)
-        self.btn_launch.grid(row=0, column=2, rowspan=4, sticky="nse", padx=(16, 0))
-
-        bar = ttk.Frame(self)
-        bar.pack(fill="x", pady=(12, 6))
-        ttk.Button(bar, text="打开版本文件夹", command=lambda: self._open("")).pack(side="left")
-        ttk.Button(bar, text="打开 mods 文件夹", command=lambda: self._open("mods")).pack(side="left", padx=6)
-        ttk.Button(bar, text="删除该版本", command=self._delete).pack(side="left")
-        ttk.Button(bar, text="清空日志", command=lambda: self.txt.delete("1.0", "end")).pack(side="right")
-        self.lbl_status = ttk.Label(bar, text="", style="Sub.TLabel")
-        self.lbl_status.pack(side="left", padx=12)
-
-        frame = ttk.Frame(self)
-        frame.pack(fill="both", expand=True)
-        self.txt = tk.Text(frame, bg="#1d2030", fg="#d7dbef", insertbackground="white",
-                           font=("Consolas", 9), relief="flat", wrap="none", padx=8, pady=6)
-        sb = ttk.Scrollbar(frame, orient="vertical", command=self.txt.yview)
+        # 日志
+        lc = ttk.Frame(self, style="LogCard.TFrame", padding=(px(16), px(12)))
+        lc.pack(fill="both", expand=True, pady=(px(16), 0))
+        head = ttk.Frame(lc, style="Log.TFrame")
+        head.pack(fill="x", pady=(0, px(6)))
+        if self.T.icon_family:
+            ttk.Label(head, text=self.T.icon("code"), style="LogIcon.TLabel").pack(side="left", padx=(0, px(8)))
+        ttk.Label(head, text="游戏日志", style="Log.TLabel").pack(side="left")
+        self.lbl_status = ttk.Label(head, text="", style="LogSub.TLabel")
+        self.lbl_status.pack(side="left", padx=px(12))
+        ttk.Button(head, text="清空", style="LogGhost.TButton",
+                   command=lambda: self.txt.delete("1.0", "end")).pack(side="right")
+        body = ttk.Frame(lc, style="Log.TFrame")
+        body.pack(fill="both", expand=True)
+        self.txt = tk.Text(body, bg=LOG_BG, fg=LOG_FG, insertbackground=LOG_FG, selectbackground="#3a4170",
+                           font=(MONO, 9), relief="flat", bd=0, highlightthickness=0, wrap="none", height=6)
+        sb = ttk.Scrollbar(body, orient="vertical", command=self.txt.yview, style="Log.Vertical.TScrollbar")
         self.txt.configure(yscrollcommand=sb.set)
         self.txt.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
+        self.txt.tag_configure("warn", foreground="#f2c94c")
+        self.txt.tag_configure("error", foreground="#ff8080")
+        self.txt.tag_configure("meow", foreground="#a5b4ff")
+        self.log("[喵喵启动器] 准备就绪，点击右上角的「启动游戏」开始吧～")
 
         self.refresh_versions(cfg.get("last_version"))
         self.refresh_accounts(cfg.get("account"))
 
+    # ---- 账户
     def refresh_accounts(self, select=None):
         items = self.app.accounts.items
         self._acc_ids = [a["id"] for a in items]
@@ -415,11 +619,30 @@ class LaunchPage(Page):
         elif items:
             self.cb_acc.current(0)
         else:
-            self.cb_acc.set("还没有账户，点「添加账户」")
+            self.cb_acc.set("还没有账户")
+        self._show_account()
 
     def _selected_account_id(self):
         i = self.cb_acc.current()
         return self._acc_ids[i] if 0 <= i < len(self._acc_ids) else None
+
+    def _show_account(self):
+        acc = self.app.accounts.get(self._selected_account_id())
+        self.av.delete("all")
+        if not acc:
+            self.lbl_acc_name.configure(text="未登录")
+            self.lbl_acc_type.configure(text="点「添加账户」")
+            self.banner.set_info(title="欢迎来到喵喵启动器")
+            return
+        n = self.px(40)
+        self.av.create_image(n / 2, n / 2, image=self.T.avatar(acc["name"], 40))
+        self.av.create_text(n / 2, n / 2, text=acc["name"][:1].upper(), fill="#ffffff", font=(FAMILY, 14, "bold"))
+        kind = auth.TYPE_NAMES.get(acc["type"], acc["type"])
+        if acc["type"] == "authlib":
+            kind += f" · {acc.get('server_name')}"
+        self.lbl_acc_name.configure(text=acc["name"])
+        self.lbl_acc_type.configure(text=kind)
+        self.banner.set_info(title=f"欢迎回来，{acc['name']}")
 
     def _remove_account(self):
         aid = self._selected_account_id()
@@ -428,6 +651,7 @@ class LaunchPage(Page):
             self.app.accounts.remove(aid)
             self.refresh_accounts()
 
+    # ---- 版本
     def refresh_versions(self, select=None):
         vs = self.app.gd.list_versions()
         self.cb_ver["values"] = vs
@@ -438,24 +662,30 @@ class LaunchPage(Page):
     def _update_info(self):
         vid = self.var_ver.get()
         if not vid:
-            self.lbl_info.configure(text="还没有安装任何版本，去「下载游戏」装一个吧")
+            self.lbl_info.configure(text="还没有安装任何版本")
+            self.banner.set_info(sub="还没有安装游戏，先去「下载游戏」装一个吧", btn_sub="")
             return
         try:
             gv = self.app.gd.game_version_of(vid)
-            loader = self.app.gd.loader_of(vid) or "原版"
+            loader = LOADER_NAMES.get(self.app.gd.loader_of(vid), "原版")
             need = self.app.gd.required_java(vid)
             self.lbl_info.configure(text=f"{gv} · {loader} · 需要 Java {need}")
+            self.banner.set_info(sub=f"当前版本  {vid}    ·    {loader}    ·    Java {need}", btn_sub=vid)
         except Exception as e:
             self.lbl_info.configure(text=f"版本文件有问题：{e}")
+            self.banner.set_info(sub="版本文件有问题", btn_sub=vid)
 
+    # ---- Java
     def set_javas(self, javas):
         want = self.app.cfg.get("java", "")
-        self._java_paths = [""] + [j.path for j in javas]
-        if want and want not in self._java_paths:
-            self._java_paths.append(want)
-        self.cb_java["values"] = ["自动选择（按版本需求）"] + [
-            f"Java {j.major}  ({j.version})  {j.path}" for j in javas] + (
-            [want] if want and want not in [j.path for j in javas] else [])
+        known = [j.path for j in javas]
+        self._java_paths = [""] + known + ([want] if want and want not in known else [])
+
+        def label(j):
+            folder = os.path.basename(os.path.dirname(os.path.dirname(j.path)))
+            return f"Java {j.major} · {folder}"
+        self.cb_java["values"] = ["自动选择"] + [label(j) for j in javas] + (
+            [f"自定义 · {want}"] if want and want not in known else [])
         self.cb_java.current(self._java_paths.index(want) if want in self._java_paths else 0)
 
     def _selected_java(self):
@@ -490,9 +720,14 @@ class LaunchPage(Page):
         if vid and messagebox.askyesno("删除版本", f"确定要删除 {vid} 吗？\n存档、mods 等该版本目录下的文件都会被删除！"):
             self.app.gd.delete_version(vid)
             self.app.versions_changed()
+            self.app.toast(f"已删除 {vid}")
 
+    # ---- 日志
     def log(self, line):
-        self.txt.insert("end", line + "\n")
+        tag = ("meow" if line.startswith("[喵喵启动器]") else
+               "error" if "/ERROR]" in line or "/FATAL]" in line or "Exception" in line else
+               "warn" if "/WARN]" in line else ())
+        self.txt.insert("end", line + "\n", tag)
         if int(self.txt.index("end-1c").split(".")[0]) > 6000:
             self.txt.delete("1.0", "1000.0")
         self.txt.see("end")
@@ -503,18 +738,18 @@ class LaunchPage(Page):
     def launch(self):
         vid = self.var_ver.get()
         if not vid:
-            messagebox.showinfo("提示", "请先在「下载游戏」里安装一个版本喵")
+            self.app.toast("请先在「下载游戏」里安装一个版本喵", "info")
             return
         acc = self.app.accounts.get(self._selected_account_id())
         if not acc:
-            messagebox.showinfo("提示", "请先添加一个账户喵")
+            self.app.toast("请先添加一个账户喵", "info")
             return
         self.store()
         save_config(self.app.cfg)
         cfg = self.app.cfg
         java_sel = cfg["java"]
         progress = self.app.progress_cb(self._progress)
-        self.btn_launch.state(["disabled"])
+        self.banner.set_enabled(False, "启动中…")
         self.log(f"[喵喵启动器] 准备启动 {vid} ……")
 
         def work():
@@ -545,12 +780,13 @@ class LaunchPage(Page):
             self.log(f"[喵喵启动器] 使用 {j}")
             if j.major < required:
                 self.log(f"[喵喵启动器] 警告：该版本需要 Java {required}，当前 Java {j.major} 可能无法启动")
-            self.lbl_status.configure(text=f"游戏运行中（PID {proc.pid}）")
-            self.after(3000, lambda: self.btn_launch.state(["!disabled"]))
+            self.lbl_status.configure(text=f"游戏运行中 · PID {proc.pid}")
+            self.app.toast("游戏启动啦，祝玩得开心喵～")
+            self.after(3000, lambda: self.banner.set_enabled(True))
             threading.Thread(target=self._read_output, args=(proc,), daemon=True).start()
 
         def failed(e):
-            self.btn_launch.state(["!disabled"])
+            self.banner.set_enabled(True)
             self.lbl_status.configure(text="启动失败")
             self.log(f"[喵喵启动器] 启动失败：{e}")
             self.app.error(e)
@@ -574,31 +810,45 @@ class AddAccountDialog(tk.Toplevel):
     def __init__(self, app):
         super().__init__(app)
         self.app = app
+        self.T = app.theme
+        px = self.T.px
         self.title("添加账户")
         self.configure(bg=BG)
         self.resizable(False, False)
         self.transient(app)
-        self.grab_set()
         self._cancel = False
         self._device = None
         self._ygg = None
         self.protocol("WM_DELETE_WINDOW", self._close)
 
-        nb = ttk.Notebook(self)
-        nb.pack(fill="both", expand=True, padx=14, pady=14)
-        nb.add(self._offline_tab(nb), text="  离线  ")
-        nb.add(self._ms_tab(nb), text="  微软正版  ")
-        nb.add(self._ygg_tab(nb), text="  外置登录  ")
+        wrap = ttk.Frame(self, padding=(px(20), px(16)))
+        wrap.pack(fill="both", expand=True)
+        ttk.Label(wrap, text="添加账户", style="H1.TLabel").pack(anchor="w")
+        ttk.Label(wrap, text="选择登录方式", style="Sub.TLabel").pack(anchor="w", pady=(0, px(12)))
+        nb = ttk.Notebook(wrap)
+        nb.pack(fill="both", expand=True)
+        nb.add(self._offline_tab(nb), text="离线")
+        nb.add(self._ms_tab(nb), text="微软正版")
+        nb.add(self._ygg_tab(nb), text="外置登录")
+
+        self.update_idletasks()
+        x = app.winfo_rootx() + (app.winfo_width() - self.winfo_width()) // 2
+        y = app.winfo_rooty() + (app.winfo_height() - self.winfo_height()) // 3
+        self.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        theme.style_titlebar(self)
+        self.grab_set()
 
     def _tab(self, nb):
-        f = ttk.Frame(nb, style="Card.TFrame", padding=18)
+        f = ttk.Frame(nb, style="Surface.TFrame", padding=self.T.px(20))
         f.columnconfigure(1, weight=1)
         return f
 
     def _done(self, acc):
         aid = self.app.accounts.add(acc)
         self.app.pages["launch"].refresh_accounts(aid)
-        self._close()
+        self.app.toast(f"已添加账户 {acc['name']}")
+        if self.winfo_exists():
+            self._close()
 
     def _close(self):
         self._cancel = True
@@ -607,13 +857,15 @@ class AddAccountDialog(tk.Toplevel):
 
     # ---- 离线
     def _offline_tab(self, nb):
+        px = self.T.px
         f = self._tab(nb)
-        ttk.Label(f, text="用户名", style="Card.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 10))
+        ttk.Label(f, text="用户名", style="Card.TLabel").grid(row=0, column=0, sticky="w", padx=(0, px(12)))
         var = tk.StringVar()
         e = ttk.Entry(f, textvariable=var, width=30)
         e.grid(row=0, column=1, sticky="we")
-        ttk.Label(f, text="3–16 位字母、数字或下划线。离线账户只能进单人或关闭了正版验证的服务器。",
-                  style="CardSub.TLabel", wraplength=380).grid(row=1, column=0, columnspan=2, sticky="w", pady=8)
+        ttk.Label(f, text="3–16位字母、数字或下划线。离线账户只能进单人或关闭了正版验证的服务器。",
+                  style="CardSub.TLabel", wraplength=px(400)).grid(row=1, column=0, columnspan=2, sticky="w",
+                                                                    pady=(px(10), px(16)))
 
         def add():
             name = var.get().strip()
@@ -622,24 +874,27 @@ class AddAccountDialog(tk.Toplevel):
                                                        parent=self):
                     return
             self._done(auth.offline_account(name))
-        ttk.Button(f, text="添加", command=add).grid(row=2, column=1, sticky="e")
+        e.bind("<Return>", lambda ev: add())
+        ttk.Button(f, text="添加", style="Accent.TButton", command=add).grid(row=2, column=1, sticky="e")
         return f
 
     # ---- 微软
     def _ms_tab(self, nb):
+        px = self.T.px
         f = self._tab(nb)
         has_id = bool(self.app.cfg.get("ms_client_id"))
         ttk.Label(f, text="使用设备码登录：点「开始登录」后，在浏览器里输入下面显示的代码并登录微软账号。"
                   + ("" if has_id else "\n\n⚠ 还没有填写 Client ID，请先到「设置」页填写。"),
-                  style="Card.TLabel", wraplength=400, justify="left").grid(row=0, column=0, columnspan=2, sticky="w")
-        self.lbl_code = tk.Label(f, text="", bg=CARD, fg=ACCENT, font=("Consolas", 26, "bold"))
-        self.lbl_code.grid(row=1, column=0, columnspan=2, pady=12)
-        self.btn_ms = ttk.Button(f, text="开始登录", command=self._ms_start)
+                  style="Card.TLabel", wraplength=px(420), justify="left").grid(row=0, column=0, columnspan=2,
+                                                                               sticky="w")
+        self.lbl_code = tk.Label(f, text="· · · ·", bg=CARD, fg=ACCENT, font=(MONO, 26, "bold"))
+        self.lbl_code.grid(row=1, column=0, columnspan=2, pady=px(16))
+        self.btn_ms = ttk.Button(f, text="开始登录", style="Accent.TButton", command=self._ms_start)
         self.btn_ms.grid(row=2, column=0, sticky="w")
         self.btn_open = ttk.Button(f, text="复制代码并打开网页", command=self._ms_open, state="disabled")
         self.btn_open.grid(row=2, column=1, sticky="e")
-        self.lbl_ms = ttk.Label(f, text="", style="CardSub.TLabel", wraplength=400, justify="left")
-        self.lbl_ms.grid(row=3, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        self.lbl_ms = ttk.Label(f, text="", style="CardSub.TLabel", wraplength=px(420), justify="left")
+        self.lbl_ms.grid(row=3, column=0, columnspan=2, sticky="w", pady=(px(12), 0))
         return f
 
     def _ms_start(self):
@@ -659,13 +914,12 @@ class AddAccountDialog(tk.Toplevel):
 
         def logged_in(acc):
             if not self._cancel:
-                messagebox.showinfo("登录成功", f"欢迎，{acc['name']}！", parent=self)
                 self._done(acc)
 
         def failed(e):
             if not self._cancel:
                 self.btn_ms.state(["!disabled"])
-                self.lbl_code.configure(text="")
+                self.lbl_code.configure(text="· · · ·")
                 self.lbl_ms.configure(text=f"登录失败：{e}")
         self.app.bg(lambda: auth.ms_start(cid), got_code, failed)
 
@@ -677,21 +931,24 @@ class AddAccountDialog(tk.Toplevel):
 
     # ---- 外置
     def _ygg_tab(self, nb):
+        px = self.T.px
         f = self._tab(nb)
         self.var_srv = tk.StringVar(value="littleskin.cn")
         self.var_login = tk.StringVar()
         self.var_pw = tk.StringVar()
         for r, (text, var, show) in enumerate((("服务器地址", self.var_srv, ""), ("邮箱 / 用户名", self.var_login, ""),
                                                ("密码", self.var_pw, "•"))):
-            ttk.Label(f, text=text, style="Card.TLabel").grid(row=r, column=0, sticky="w", pady=4, padx=(0, 10))
-            ttk.Entry(f, textvariable=var, width=34, show=show).grid(row=r, column=1, sticky="we")
+            ttk.Label(f, text=text, style="Card.TLabel").grid(row=r, column=0, sticky="w", pady=px(4),
+                                                              padx=(0, px(12)))
+            ttk.Entry(f, textvariable=var, width=34, show=show).grid(row=r, column=1, sticky="we", pady=px(4))
         ttk.Label(f, text="支持任何兼容 authlib-injector 的皮肤站，例如 LittleSkin。密码只用来登录，不会被保存。",
-                  style="CardSub.TLabel", wraplength=400).grid(row=3, column=0, columnspan=2, sticky="w", pady=6)
+                  style="CardSub.TLabel", wraplength=px(420)).grid(row=3, column=0, columnspan=2, sticky="w",
+                                                                    pady=px(8))
         self.cb_prof = ttk.Combobox(f, state="readonly")
-        self.btn_ygg = ttk.Button(f, text="登录", command=self._ygg_login)
-        self.btn_ygg.grid(row=5, column=1, sticky="e")
-        self.lbl_ygg = ttk.Label(f, text="", style="CardSub.TLabel", wraplength=400)
-        self.lbl_ygg.grid(row=6, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self.btn_ygg = ttk.Button(f, text="登录", style="Accent.TButton", command=self._ygg_login)
+        self.btn_ygg.grid(row=5, column=1, sticky="e", pady=(px(6), 0))
+        self.lbl_ygg = ttk.Label(f, text="", style="CardSub.TLabel", wraplength=px(420))
+        self.lbl_ygg.grid(row=6, column=0, columnspan=2, sticky="w", pady=(px(8), 0))
         return f
 
     def _ygg_login(self):
@@ -720,7 +977,7 @@ class AddAccountDialog(tk.Toplevel):
             self._ygg = (acc, profiles)
             self.cb_prof.configure(values=[p["name"] for p in profiles])
             self.cb_prof.current(0)
-            self.cb_prof.grid(row=4, column=1, sticky="we", pady=4)
+            self.cb_prof.grid(row=4, column=1, sticky="we", pady=self.T.px(4))
             ttk.Label(self.cb_prof.master, text="选择角色", style="Card.TLabel").grid(row=4, column=0, sticky="w")
             self.btn_ygg.configure(text="使用这个角色")
             self.btn_ygg.state(["!disabled"])
@@ -736,52 +993,63 @@ class AddAccountDialog(tk.Toplevel):
 
 class DownloadPage(Page):
     def build(self):
+        px = self.px
         self.header("下载游戏", "安装任意版本的 Minecraft，可以顺手装上 Fabric / Forge / NeoForge")
         self.selected = None
         self._loader_list = []
         self._token = 0
 
-        top = ttk.Frame(self)
-        top.pack(fill="x", pady=(0, 8))
+        bar = self.card(pad=12)
+        bar.pack(fill="x", pady=(0, px(14)))
+        r = self.row(bar)
+        if self.T.icon_family:
+            ttk.Label(r, text=self.T.icon("search"), style="CardIcon.TLabel").pack(side="left", padx=(px(4), px(8)))
+        self.var_filter = tk.StringVar()
+        self.var_filter.trace_add("write", lambda *a: self.fill())
+        ttk.Entry(r, textvariable=self.var_filter, width=24).pack(side="left")
         self.var_types = {}
         for t, default in (("release", True), ("snapshot", False), ("old_beta", False)):
             var = tk.BooleanVar(value=default)
             self.var_types[t] = var
-            ttk.Checkbutton(top, text={"old_beta": "远古版"}.get(t, TYPE_NAMES[t]), variable=var,
-                            command=self.fill).pack(side="left", padx=(0, 10))
-        ttk.Label(top, text="搜索：").pack(side="left", padx=(12, 0))
-        self.var_filter = tk.StringVar()
-        self.var_filter.trace_add("write", lambda *a: self.fill())
-        ttk.Entry(top, textvariable=self.var_filter, width=20).pack(side="left")
-        ttk.Button(top, text="刷新列表", command=lambda: self.load(force=True)).pack(side="right")
+            ttk.Checkbutton(r, text={"old_beta": "远古版"}.get(t, TYPE_NAMES[t]), variable=var,
+                            style="Card.TCheckbutton", command=self.fill).pack(side="left", padx=(px(18), 0))
+        ttk.Button(r, text="刷新列表", command=lambda: self.load(force=True)).pack(side="right")
 
         body = ttk.Frame(self)
         body.pack(fill="both", expand=True)
-        frame, self.tree = scrolled_tree(body, ("id", "type", "time"), ("版本", "类型", "发布时间"),
-                                         (240, 110, 160))
-        frame.pack(side="left", fill="both", expand=True)
+        left = self.card(body, pad=6)
+        left.pack(side="left", fill="both", expand=True)
+        frame, self.tree = make_tree(left, ("id", "type", "time", "state"), ("版本", "类型", "发布时间", "状态"),
+                                     (240, 110, 140, 100))
+        frame.pack(fill="both", expand=True)
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
 
-        panel = ttk.Frame(body, style="Card.TFrame", padding=16, width=300)
-        panel.pack(side="right", fill="y", padx=(12, 0))
+        panel = self.card(body, pad=20)
+        panel.configure(width=px(310))
+        panel.pack(side="right", fill="y", padx=(px(14), 0))
         panel.pack_propagate(False)
-        self.lbl_sel = ttk.Label(panel, text="← 先选一个版本", style="Card.TLabel", font=(FAMILY, 13, "bold"))
-        self.lbl_sel.pack(anchor="w", pady=(0, 12))
+        ttk.Label(panel, text="已选择", style="CardSub.TLabel").pack(anchor="w")
+        self.lbl_sel = ttk.Label(panel, text="还没选版本", style="CardBig.TLabel")
+        self.lbl_sel.pack(anchor="w")
+        self.lbl_sel_sub = ttk.Label(panel, text="在左边列表里点一个版本", style="CardSub.TLabel")
+        self.lbl_sel_sub.pack(anchor="w", pady=(0, px(14)))
+        ttk.Separator(panel).pack(fill="x", pady=(0, px(14)))
         ttk.Label(panel, text="Mod 加载器", style="Card.TLabel").pack(anchor="w")
         self.cb_loader = ttk.Combobox(panel, state="readonly", values=[n for n, _ in INSTALL_LOADERS])
         self.cb_loader.current(0)
-        self.cb_loader.pack(fill="x", pady=(2, 10))
+        self.cb_loader.pack(fill="x", pady=(px(4), px(12)))
         self.cb_loader.bind("<<ComboboxSelected>>", lambda e: self._load_loader())
         self.lbl_lv = ttk.Label(panel, text="加载器版本", style="Card.TLabel")
         self.lbl_lv.pack(anchor="w")
         self.cb_lv = ttk.Combobox(panel, state="disabled")
-        self.cb_lv.pack(fill="x", pady=(2, 16))
-        self.btn_install = ttk.Button(panel, text="安装", style="Accent.TButton", command=self.install)
+        self.cb_lv.pack(fill="x", pady=(px(4), px(20)))
+        self.btn_install = ttk.Button(panel, text="安装", style="Big.Accent.TButton", command=self.install)
         self.btn_install.pack(fill="x")
         self.bar = ttk.Progressbar(panel, mode="determinate")
-        self.bar.pack(fill="x", pady=(16, 4))
-        self.lbl_status = ttk.Label(panel, text="", style="CardSub.TLabel", wraplength=260, justify="left")
-        self.lbl_status.pack(anchor="w")
+        self.bar.pack(fill="x", pady=(px(18), px(6)))
+        self.lbl_status = ttk.Label(panel, text="", style="CardSub.TLabel", wraplength=px(230), justify="left")
+        self.lbl_status.pack(anchor="w", fill="x")
+        self.lbl_status.bind("<Configure>", lambda e: self.lbl_status.configure(wraplength=max(e.width, 100)))
 
     def on_show(self):
         if not self.app.manifest:
@@ -816,9 +1084,10 @@ class DownloadPage(Page):
                 continue
             if kw and kw not in v["id"].lower():
                 continue
-            name = v["id"] + ("   ✔ 已安装" if v["id"] in installed else "")
-            self.tree.insert("", "end", iid=v["id"],
-                             values=(name, TYPE_NAMES.get(t, t), v["releaseTime"][:10]))
+            done = v["id"] in installed
+            self.tree.insert("", "end", iid=v["id"], tags=("accent",) if done else (),
+                             values=(v["id"], TYPE_NAMES.get(t, t), v["releaseTime"][:10], "✔ 已安装" if done else ""))
+        restripe(self.tree)
 
     def refresh_versions(self, select=None):
         self.fill()
@@ -828,7 +1097,9 @@ class DownloadPage(Page):
         if not sel:
             return
         self.selected = sel[0]
+        v = next((x for x in self.app.manifest["versions"] if x["id"] == self.selected), {})
         self.lbl_sel.configure(text=self.selected)
+        self.lbl_sel_sub.configure(text=f"{TYPE_NAMES.get(v.get('type'), '')} · 发布于 {v.get('releaseTime', '')[:10]}")
         self._load_loader()
 
     def _load_loader(self):
@@ -869,7 +1140,7 @@ class DownloadPage(Page):
 
     def install(self):
         if not self.selected:
-            messagebox.showinfo("提示", "先在左边选一个版本喵")
+            self.app.toast("先在左边选一个版本喵", "info")
             return
         gv = self.selected
         gd, manifest = self.app.gd, self.app.manifest
@@ -878,7 +1149,7 @@ class DownloadPage(Page):
         if kind:
             i = self.cb_lv.current()
             if i < 0 or not self._loader_list:
-                messagebox.showinfo("提示", f"请先选择 {name} 版本")
+                self.app.toast(f"请先选择 {name} 版本", "info")
                 return
             lv = self._loader_list[i]["version"]
             if kind == "fabric":
@@ -888,15 +1159,18 @@ class DownloadPage(Page):
         else:
             work = lambda: gd.install_vanilla(gv, progress, manifest)
         self.btn_install.state(["disabled"])
+        self.btn_install.configure(text="安装中…")
 
         def ok(vid):
             self.btn_install.state(["!disabled"])
+            self.btn_install.configure(text="安装")
             self.lbl_status.configure(text=f"安装完成：{vid}")
             self.app.versions_changed(select=vid)
-            messagebox.showinfo("安装完成", f"{vid} 安装好啦，去「启动游戏」开玩吧！")
+            self.app.toast(f"{vid} 安装好啦，去「启动游戏」开玩吧！")
 
         def err(e):
             self.btn_install.state(["!disabled"])
+            self.btn_install.configure(text="安装")
             self.lbl_status.configure(text=f"安装失败：{e}")
             self.app.error(e)
         self.app.bg(work, ok, err)
@@ -906,7 +1180,8 @@ class DownloadPage(Page):
 
 class ModPage(Page):
     def build(self):
-        self.header("下载 Mod", "数据来自 Modrinth，可按游戏版本、加载器筛选，自动下载前置")
+        px = self.px
+        self.header("下载 Mod", "数据来自 Modrinth，用英文名搜索效果最好（如 sodium、jei），会自动下载前置")
         self.page = 0
         self.total = 0
         self.hits = {}
@@ -914,67 +1189,75 @@ class ModPage(Page):
         self._search_token = 0
         self._ver_token = 0
 
-        row = ttk.Frame(self)
-        row.pack(fill="x")
+        top = self.card(pad=14)
+        top.pack(fill="x", pady=(0, px(14)))
+        r = self.row(top)
+        if self.T.icon_family:
+            ttk.Label(r, text=self.T.icon("search"), style="CardIcon.TLabel").pack(side="left", padx=(px(4), px(8)))
         self.var_q = tk.StringVar()
-        e = ttk.Entry(row, textvariable=self.var_q, width=46)
-        e.pack(side="left")
+        e = ttk.Entry(r, textvariable=self.var_q, font=(FAMILY, 11))
+        e.pack(side="left", fill="x", expand=True)
         e.bind("<Return>", lambda ev: self.search(0))
-        ttk.Button(row, text="搜索", command=lambda: self.search(0)).pack(side="left", padx=6)
-        ttk.Label(row, text="（Modrinth 用英文名搜索效果最好，如 sodium、jei）", style="Sub.TLabel").pack(side="left")
+        ttk.Button(r, text="搜索", style="Accent.TButton", command=lambda: self.search(0)).pack(
+            side="left", padx=(px(10), 0))
+        r = self.row(top, pady=(px(12), 0))
 
-        row = ttk.Frame(self)
-        row.pack(fill="x", pady=8)
-        ttk.Label(row, text="安装到").pack(side="left")
+        def field(text, widget):
+            ttk.Label(r, text=text, style="CardSub.TLabel").pack(side="left", padx=(0, px(6)))
+            widget.pack(side="left", padx=(0, px(18)))
+            return widget
         self.var_inst = tk.StringVar()
-        self.cb_inst = ttk.Combobox(row, textvariable=self.var_inst, state="readonly", width=34)
-        self.cb_inst.pack(side="left", padx=(4, 14))
+        self.cb_inst = field("安装到", ttk.Combobox(r, textvariable=self.var_inst, state="readonly", width=28))
         self.cb_inst.bind("<<ComboboxSelected>>", lambda ev: self._sync_filters())
-        ttk.Label(row, text="游戏版本").pack(side="left")
         self.var_gv = tk.StringVar()
-        ttk.Combobox(row, textvariable=self.var_gv, width=12).pack(side="left", padx=(4, 14))
-        ttk.Label(row, text="加载器").pack(side="left")
-        self.cb_loader = ttk.Combobox(row, state="readonly", width=10, values=[n for n, _ in LOADERS])
+        field("游戏版本", ttk.Combobox(r, textvariable=self.var_gv, width=9))
+        self.cb_loader = field("加载器", ttk.Combobox(r, state="readonly", width=9, values=[n for n, _ in LOADERS]))
         self.cb_loader.current(0)
-        self.cb_loader.pack(side="left", padx=(4, 14))
-        ttk.Label(row, text="排序").pack(side="left")
-        self.cb_sort = ttk.Combobox(row, state="readonly", width=9, values=[n for n, _ in SORTS])
+        self.cb_sort = field("排序", ttk.Combobox(r, state="readonly", width=8, values=[n for n, _ in SORTS]))
         self.cb_sort.current(0)
-        self.cb_sort.pack(side="left", padx=4)
         self.cb_sort.bind("<<ComboboxSelected>>", lambda ev: self.search(0))
+
+        # 底栏先固定在底部，避免窗口矮的时候被列表挤出去
+        bottom = ttk.Frame(self)
+        bottom.pack(side="bottom", fill="x", pady=(px(12), 0))
+        self.btn_prev = ttk.Button(bottom, text="‹ 上一页", style="Bg.TButton", command=lambda: self.search(self.page - 1))
+        self.btn_prev.pack(side="left")
+        self.lbl_page = ttk.Label(bottom, text="", style="Sub.TLabel")
+        self.lbl_page.pack(side="left", padx=px(12))
+        self.btn_next = ttk.Button(bottom, text="下一页 ›", style="Bg.TButton", command=lambda: self.search(self.page + 1))
+        self.btn_next.pack(side="left")
+        self.lbl_status = ttk.Label(bottom, text="", style="Sub.TLabel")
+        self.lbl_status.pack(side="right")
 
         pane = ttk.Panedwindow(self, orient="horizontal")
         pane.pack(fill="both", expand=True)
-        left, self.tree = scrolled_tree(pane, ("title", "author", "dl", "desc"),
-                                        ("名称", "作者", "下载量", "简介"), (180, 100, 80, 320))
+        left = self.card(pane, pad=6)
+        frame, self.tree = make_tree(left, ("title", "author", "dl", "desc"),
+                                     ("名称", "作者", "下载量", "简介"), (190, 100, 80, 300))
+        frame.pack(fill="both", expand=True)
         self.tree.bind("<<TreeviewSelect>>", self._on_pick)
         pane.add(left, weight=3)
 
-        right = ttk.Frame(pane, style="Card.TFrame", padding=10)
+        right = self.card(pane, pad=16)
         pane.add(right, weight=2)
-        self.lbl_detail = ttk.Label(right, text="选择左边的 Mod 查看可用版本", style="Card.TLabel",
-                                    wraplength=380, justify="left")
-        self.lbl_detail.pack(anchor="w", fill="x", pady=(0, 8))
-        vframe, self.vtree = scrolled_tree(right, ("name", "gv", "loader", "date"),
-                                           ("版本", "游戏版本", "加载器", "日期"), (200, 110, 90, 90))
+        self.lbl_title = ttk.Label(right, text="选择一个 Mod", style="CardBig.TLabel")
+        self.lbl_title.pack(anchor="w")
+        self.lbl_meta = ttk.Label(right, text="在左边列表里点一个 Mod 查看可用版本", style="CardSub.TLabel")
+        self.lbl_meta.pack(anchor="w")
+        self.lbl_desc = ttk.Label(right, text="", style="Card.TLabel", justify="left")
+        self.lbl_desc.pack(anchor="w", fill="x", pady=(px(8), px(10)))
+        right.bind("<Configure>", lambda ev: self.lbl_desc.configure(wraplength=max(ev.width - px(36), 100)))
+        r = ttk.Frame(right, style="Surface.TFrame")
+        r.pack(side="bottom", fill="x", pady=(px(12), 0))
+        vframe, self.vtree = make_tree(right, ("name", "gv", "loader", "date"),
+                                       ("版本", "游戏版本", "加载器", "日期"), (200, 110, 90, 90), height=6)
         vframe.pack(fill="both", expand=True)
         self.vtree.bind("<Double-1>", lambda e: self.download())
-
-        bottom = ttk.Frame(self)
-        bottom.pack(fill="x", pady=(8, 0))
-        self.btn_prev = ttk.Button(bottom, text="上一页", command=lambda: self.search(self.page - 1))
-        self.btn_prev.pack(side="left")
-        self.lbl_page = ttk.Label(bottom, text="")
-        self.lbl_page.pack(side="left", padx=8)
-        self.btn_next = ttk.Button(bottom, text="下一页", command=lambda: self.search(self.page + 1))
-        self.btn_next.pack(side="left")
-        self.btn_dl = ttk.Button(bottom, text="下载所选版本", command=self.download)
-        self.btn_dl.pack(side="right")
         self.var_deps = tk.BooleanVar(value=True)
-        ttk.Checkbutton(bottom, text="同时下载必需前置", variable=self.var_deps).pack(side="right", padx=10)
-        ttk.Button(bottom, text="在浏览器中查看", command=self._open_web).pack(side="right")
-        self.lbl_status = ttk.Label(self, text="", style="Sub.TLabel")
-        self.lbl_status.pack(anchor="w", pady=(6, 0))
+        ttk.Checkbutton(r, text="同时下载必需前置", variable=self.var_deps, style="Card.TCheckbutton").pack(side="left")
+        self.btn_dl = ttk.Button(r, text="下载所选版本", style="Accent.TButton", command=self.download)
+        self.btn_dl.pack(side="right")
+        ttk.Button(r, text="网页", style="Ghost.TButton", command=self._open_web).pack(side="right", padx=px(4))
 
         self.refresh_versions()
         self._searched = False
@@ -1029,8 +1312,9 @@ class ModPage(Page):
             for h in res["hits"]:
                 self.tree.insert("", "end", iid=h["project_id"], values=(
                     h["title"], h.get("author", ""), fmt_num(h.get("downloads", 0)), h.get("description", "")))
+            restripe(self.tree)
             pages = max(1, -(-self.total // mods.PAGE_SIZE))
-            self.lbl_page.configure(text=f"第 {page + 1} / {pages} 页（共 {self.total} 个）")
+            self.lbl_page.configure(text=f"第 {page + 1} / {pages} 页 · 共 {self.total} 个")
             self.btn_prev.state(["!disabled"] if page > 0 else ["disabled"])
             self.btn_next.state(["!disabled"] if page + 1 < pages else ["disabled"])
             self.lbl_status.configure(text="" if self.total else "什么都没搜到喵，换个关键词或放宽筛选试试")
@@ -1046,7 +1330,9 @@ class ModPage(Page):
             return
         pid = sel[0]
         h = self.hits.get(pid, {})
-        self.lbl_detail.configure(text=f"{h.get('title')}  ·  {h.get('author')}\n{h.get('description', '')}")
+        self.lbl_title.configure(text=h.get("title", ""))
+        self.lbl_meta.configure(text=f"by {h.get('author')}  ·  {fmt_num(h.get('downloads', 0))} 次下载")
+        self.lbl_desc.configure(text=h.get("description", ""))
         gv, loader = self._filters()
         self._ver_token += 1
         token = self._ver_token
@@ -1063,9 +1349,10 @@ class ModPage(Page):
                 self.vtree.insert("", "end", iid=v["id"], values=(
                     v.get("name") or v.get("version_number"), gv_text,
                     ", ".join(v.get("loaders", [])), v.get("date_published", "")[:10]))
+            restripe(self.vtree)
             if vs:
                 self.vtree.selection_set(vs[0]["id"])
-                self.lbl_status.configure(text=f"找到 {len(vs)} 个版本，双击或点「下载所选版本」即可安装")
+                self.lbl_status.configure(text=f"找到 {len(vs)} 个版本，双击即可安装")
             else:
                 self.lbl_status.configure(text=f"没有适配 {gv or '任意版本'} / {loader or '任意加载器'} 的版本")
 
@@ -1083,11 +1370,11 @@ class ModPage(Page):
     def download(self):
         inst = self.var_inst.get()
         if not inst:
-            messagebox.showinfo("提示", "还没有安装游戏版本，先去「下载游戏」装一个喵")
+            self.app.toast("还没有安装游戏版本，先去「下载游戏」装一个喵", "info")
             return
         sel = self.vtree.selection()
         if not sel:
-            messagebox.showinfo("提示", "请先在右侧选择一个 Mod 版本")
+            self.app.toast("请先在右侧选择一个 Mod 版本", "info")
             return
         v = self.versions[sel[0]]
         gv, loader = self._filters()
@@ -1098,9 +1385,9 @@ class ModPage(Page):
 
         def ok(result):
             self.btn_dl.state(["!disabled"])
-            names = "\n".join(f"{'✔ 已下载' if new else '· 已存在'}  {n}" for n, new in result)
-            self.lbl_status.configure(text=f"完成！共 {len(result)} 个文件 → {inst}")
-            messagebox.showinfo("下载完成", f"已安装到 {inst}：\n\n{names}")
+            new = sum(1 for _, n in result if n)
+            self.lbl_status.configure(text="、".join(n for n, _ in result))
+            self.app.toast(f"已安装到 {inst}：新下载 {new} 个，共 {len(result)} 个文件")
 
         def err(e):
             self.btn_dl.state(["!disabled"])
@@ -1113,24 +1400,29 @@ class ModPage(Page):
 
 class ModManagePage(Page):
     def build(self):
+        px = self.px
         self.header("Mod 管理", "查看、启用 / 禁用、删除某个版本里已安装的 Mod")
-        row = ttk.Frame(self)
-        row.pack(fill="x", pady=(0, 8))
-        ttk.Label(row, text="版本").pack(side="left")
+        bar = self.card(pad=12)
+        bar.pack(fill="x", pady=(0, px(14)))
+        r = self.row(bar)
+        ttk.Label(r, text="版本", style="CardSub.TLabel").pack(side="left", padx=(px(4), px(8)))
         self.var_inst = tk.StringVar()
-        self.cb = ttk.Combobox(row, textvariable=self.var_inst, state="readonly", width=36)
-        self.cb.pack(side="left", padx=6)
+        self.cb = ttk.Combobox(r, textvariable=self.var_inst, state="readonly", width=34)
+        self.cb.pack(side="left")
         self.cb.bind("<<ComboboxSelected>>", lambda e: self.fill())
-        for text, cmd in (("刷新", self.fill), ("启用 / 禁用", self.toggle), ("删除", self.delete),
-                          ("打开 mods 文件夹", self.open)):
-            ttk.Button(row, text=text, command=cmd).pack(side="left", padx=3)
-        frame, self.tree = scrolled_tree(self, ("name", "state", "size"), ("文件名", "状态", "大小"),
-                                         (480, 90, 100), height=18)
-        self.tree.configure(selectmode="extended")
+        ttk.Button(r, text="打开 mods 文件夹", command=self.open).pack(side="right")
+        ttk.Button(r, text="删除", style="Danger.TButton", command=self.delete).pack(side="right", padx=px(6))
+        ttk.Button(r, text="启用 / 禁用", command=self.toggle).pack(side="right")
+        ttk.Button(r, text="刷新", command=self.fill).pack(side="right", padx=px(6))
+
+        box = self.card(pad=6)
+        box.pack(fill="both", expand=True)
+        frame, self.tree = make_tree(box, ("name", "state", "size"), ("文件名", "状态", "大小"),
+                                     (480, 100, 100), height=10, selectmode="extended")
         frame.pack(fill="both", expand=True)
         self.tree.bind("<Double-1>", lambda e: self.toggle())
         self.lbl = ttk.Label(self, text="", style="Sub.TLabel")
-        self.lbl.pack(anchor="w", pady=(6, 0))
+        self.lbl.pack(anchor="w", pady=(px(10), 0))
         self.refresh_versions()
 
     def on_show(self):
@@ -1151,15 +1443,17 @@ class ModManagePage(Page):
         self.tree.delete(*self.tree.get_children())
         d = self._dir()
         if not d or not os.path.isdir(d):
-            self.lbl.configure(text="这个版本还没有 Mod")
+            self.lbl.configure(text="这个版本还没有 Mod，去「下载 Mod」挑几个吧")
             return
         files = sorted(f for f in os.listdir(d) if f.endswith((".jar", ".jar.disabled")))
         for f in files:
             on = f.endswith(".jar")
-            self.tree.insert("", "end", iid=f, values=(
-                f.removesuffix(".disabled"), "启用" if on else "已禁用", fmt_size(os.path.getsize(os.path.join(d, f)))))
+            self.tree.insert("", "end", iid=f, tags=() if on else ("muted",), values=(
+                f.removesuffix(".disabled"), "● 已启用" if on else "○ 已禁用",
+                fmt_size(os.path.getsize(os.path.join(d, f)))))
+        restripe(self.tree)
         enabled = sum(f.endswith(".jar") for f in files)
-        self.lbl.configure(text=f"共 {len(files)} 个 Mod，已启用 {enabled} 个（双击切换启用状态）")
+        self.lbl.configure(text=f"共 {len(files)} 个 Mod，已启用 {enabled} 个 · 双击切换启用状态，可按住 Ctrl 多选")
 
     def toggle(self):
         d = self._dir()
@@ -1175,6 +1469,7 @@ class ModManagePage(Page):
             for f in sel:
                 os.remove(os.path.join(self._dir(), f))
             self.fill()
+            self.app.toast(f"已删除 {len(sel)} 个 Mod")
 
     def open(self):
         d = self._dir()
@@ -1187,61 +1482,76 @@ class ModManagePage(Page):
 class SettingsPage(Page):
     def build(self):
         cfg = self.app.cfg
-        self.header("设置")
-        card = ttk.Frame(self, style="Card.TFrame", padding=18)
-        card.pack(fill="x")
-        card.columnconfigure(1, weight=1)
+        px = self.px
+        self.header("设置", "修改后记得点「保存设置」")
 
-        def label(r, t):
-            ttk.Label(card, text=t, style="Card.TLabel").grid(row=r, column=0, sticky="w", pady=6, padx=(0, 14))
+        def grid_card(parent, icon, title):
+            c = self.card(parent, pad=18)
+            self.card_title(c, icon, title).pack(fill="x", pady=(0, px(12)))
+            g = ttk.Frame(c, style="Surface.TFrame")
+            g.pack(fill="x")
+            g.columnconfigure(1, weight=1)
+            return c, g
 
-        label(0, "游戏目录")
-        row = ttk.Frame(card, style="Card.TFrame")
+        def label(g, r, t):
+            ttk.Label(g, text=t, style="Card.TLabel").grid(row=r, column=0, sticky="w", pady=px(5), padx=(0, px(16)))
+
+        c, g = grid_card(self, "folder", "游戏")
+        c.pack(fill="x")
+        label(g, 0, "游戏目录")
+        row = ttk.Frame(g, style="Surface.TFrame")
         row.grid(row=0, column=1, sticky="we")
         self.var_dir = tk.StringVar(value=cfg["game_dir"])
         ttk.Entry(row, textvariable=self.var_dir).pack(side="left", fill="x", expand=True)
-        ttk.Button(row, text="浏览…", command=self._browse).pack(side="left", padx=6)
+        ttk.Button(row, text="浏览…", command=self._browse).pack(side="left", padx=px(6))
         ttk.Button(row, text="打开", command=lambda: open_folder(self.var_dir.get())).pack(side="left")
-
-        label(1, "下载源")
-        self.cb_src = ttk.Combobox(card, state="readonly", width=28, values=[n for n, _ in SOURCES])
-        codes = [c for _, c in SOURCES]
-        self.cb_src.current(codes.index(cfg["source"]) if cfg["source"] in codes else 0)
-        self.cb_src.grid(row=1, column=1, sticky="w")
-
-        label(2, "下载线程数")
-        self.var_threads = tk.IntVar(value=cfg["threads"])
-        ttk.Spinbox(card, from_=1, to=128, textvariable=self.var_threads, width=8).grid(row=2, column=1, sticky="w")
-
-        label(3, "游戏窗口大小")
-        row = ttk.Frame(card, style="Card.TFrame")
-        row.grid(row=3, column=1, sticky="w")
+        label(g, 1, "游戏窗口大小")
+        row = ttk.Frame(g, style="Surface.TFrame")
+        row.grid(row=1, column=1, sticky="w")
         self.var_w = tk.IntVar(value=cfg["width"])
         self.var_h = tk.IntVar(value=cfg["height"])
         ttk.Spinbox(row, from_=320, to=7680, textvariable=self.var_w, width=7).pack(side="left")
-        ttk.Label(row, text=" × ", style="Card.TLabel").pack(side="left")
+        ttk.Label(row, text="  ×  ", style="Card.TLabel").pack(side="left")
         ttk.Spinbox(row, from_=240, to=4320, textvariable=self.var_h, width=7).pack(side="left")
-
-        label(4, "额外 JVM 参数")
+        label(g, 2, "额外 JVM 参数")
         self.var_jvm = tk.StringVar(value=cfg["jvm_args"])
-        ttk.Entry(card, textvariable=self.var_jvm).grid(row=4, column=1, sticky="we")
+        ttk.Entry(g, textvariable=self.var_jvm).grid(row=2, column=1, sticky="we")
 
-        label(5, "微软登录 Client ID")
-        row = ttk.Frame(card, style="Card.TFrame")
-        row.grid(row=5, column=1, sticky="we")
+        two = ttk.Frame(self)
+        two.pack(fill="x", pady=(px(14), 0))
+        two.columnconfigure(0, weight=2, uniform="s")
+        two.columnconfigure(1, weight=3, uniform="s")
+        c, g = grid_card(two, "download", "下载")
+        c.grid(row=0, column=0, sticky="nsew", padx=(0, px(7)))
+        label(g, 0, "下载源")
+        self.cb_src = ttk.Combobox(g, state="readonly", values=[n for n, _ in SOURCES])
+        codes = [c for _, c in SOURCES]
+        self.cb_src.current(codes.index(cfg["source"]) if cfg["source"] in codes else 0)
+        self.cb_src.grid(row=0, column=1, sticky="we")
+        label(g, 1, "下载线程数")
+        self.var_threads = tk.IntVar(value=cfg["threads"])
+        ttk.Spinbox(g, from_=1, to=128, textvariable=self.var_threads, width=7).grid(row=1, column=1, sticky="w")
+
+        c, g = grid_card(two, "person", "微软登录")
+        c.grid(row=0, column=1, sticky="nsew", padx=(px(7), 0))
+        label(g, 0, "Client ID")
         self.var_cid = tk.StringVar(value=cfg["ms_client_id"])
-        ttk.Entry(row, textvariable=self.var_cid, width=40).pack(side="left")
-        ttk.Button(row, text="① 注册 Azure 应用",
-                   command=lambda: webbrowser.open(auth.AZURE_REGISTER_URL)).pack(side="left", padx=6)
-        ttk.Button(row, text="② 申请 Mojang 审核",
+        ttk.Entry(g, textvariable=self.var_cid).grid(row=0, column=1, sticky="we")
+        row = ttk.Frame(g, style="Surface.TFrame")
+        row.grid(row=1, column=1, sticky="w", pady=(px(6), 0))
+        ttk.Button(row, text="注册 Azure 应用", style="Ghost.TButton",
+                   command=lambda: webbrowser.open(auth.AZURE_REGISTER_URL)).pack(side="left")
+        ttk.Button(row, text="申请 Mojang 审核", style="Ghost.TButton",
                    command=lambda: webbrowser.open(auth.MOJANG_REVIEW_URL)).pack(side="left")
-        ttk.Label(card, text="注册时账户类型选「仅个人 Microsoft 帐户」，并在「身份验证」里打开「允许公共客户端流」。"
-                  "审核通过之前微软登录会被 Minecraft 拒绝（403）。",
-                  style="CardSub.TLabel", wraplength=640, justify="left").grid(row=6, column=1, sticky="w")
+        ttk.Label(g, text="已内置喵喵启动器的 Client ID，一般不用改。", style="CardSub.TLabel").grid(
+            row=2, column=1, sticky="w", pady=(px(4), 0))
 
-        ttk.Button(self, text="保存设置", command=self.save).pack(anchor="w", pady=14)
-        ttk.Label(self, text="账户保存在启动器目录的 accounts.json（含登录令牌，不要发给别人）；每个版本的存档 / Mod / 配置都单独放在 versions/<版本名> 下（版本隔离）。",
-                  style="Sub.TLabel").pack(anchor="w")
+        foot = ttk.Frame(self)
+        foot.pack(fill="x", pady=(px(18), 0))
+        ttk.Button(foot, text="保存设置", style="Big.Accent.TButton", command=self.save).pack(side="left")
+        ttk.Label(foot, text="账户保存在 accounts.json（含登录令牌，不要发给别人）\n"
+                             "每个版本的存档 / Mod / 配置都单独放在 versions/<版本名> 下（版本隔离）",
+                  style="Sub.TLabel", justify="left").pack(side="left", padx=px(18))
 
     def _browse(self):
         d = filedialog.askdirectory(initialdir=self.var_dir.get())
@@ -1267,7 +1577,7 @@ class SettingsPage(Page):
         self.app.pages["launch"].store()
         save_config(cfg)
         self.app.versions_changed()
-        messagebox.showinfo("设置", "已保存喵～")
+        self.app.toast("设置已保存喵～")
 
 
 def main():

@@ -2,6 +2,10 @@
 
 一个类似 HMCL 的 Minecraft 启动器，纯 Python 编写，**不需要安装任何第三方库**（只用标准库 + tkinter）。
 
+![启动页](docs/launch.png)
+
+![下载 Mod](docs/mods.png)
+
 ## 运行
 
 需要 Python 3.9+ 和 Java（游戏需要的版本：1.20.5+ 要 Java 21，1.17–1.20.4 要 Java 17，更老的要 Java 8）。
@@ -55,6 +59,7 @@ mcl/java.py      扫描本机 Java 并按需求选择
 mcl/auth.py      账户：离线、微软设备码登录、authlib-injector 外置登录
 mcl/mods.py      Modrinth 搜索、版本、前置依赖解析与下载
 mcl/gui.py       tkinter 界面
+mcl/theme.py     界面主题：纯 Python 生成抗锯齿圆角图片，给 ttk 控件换皮
 ```
 
 ## 暂不支持
