@@ -1,0 +1,13 @@
+﻿# 个人数据：账户令牌、配置
+accounts.json
+accounts.json.tmp
+config.json
+
+# 游戏文件
+.minecraft/
+
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
