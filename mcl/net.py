@@ -44,16 +44,16 @@ class DownloadError(Exception):
 
 
 class Task:
-    __slots__ = ("url", "path", "sha1", "size")
+    __slots__ = ("url", "path", "sha1", "size", "mirror")
 
-    def __init__(self, url, path, sha1=None, size=None):
-        self.url, self.path, self.sha1, self.size = url, path, sha1, size
+    def __init__(self, url, path, sha1=None, size=None, mirror=True):
+        self.url, self.path, self.sha1, self.size, self.mirror = url, path, sha1, size, mirror
 
 
-def candidate_urls(url):
-    """按当前下载源给出要尝试的地址列表，镜像失败时回落到官方。"""
+def candidate_urls(url, mirror=True):
+    """按当前下载源给出要尝试的地址列表，镜像失败时回落到官方。mirror=False 只用官方源。"""
     urls = []
-    if _source == "bmclapi":
+    if mirror and _source == "bmclapi":
         for prefix, repl in _MIRROR_RULES:
             if url.startswith(prefix):
                 urls.append(repl + url[len(prefix):])
@@ -71,9 +71,9 @@ def _open(url, data=None, headers=None):
     return urllib.request.urlopen(req, timeout=TIMEOUT)
 
 
-def fetch_bytes(url, retries=2):
+def fetch_bytes(url, retries=2, mirror=True):
     last = None
-    for u in candidate_urls(url):
+    for u in candidate_urls(url, mirror):
         for i in range(retries):
             try:
                 with _open(u) as r:
@@ -88,8 +88,8 @@ def fetch_bytes(url, retries=2):
     raise DownloadError(f"无法获取 {url}：{last}")
 
 
-def fetch_json(url):
-    return json.loads(fetch_bytes(url).decode("utf-8"))
+def fetch_json(url, mirror=True):
+    return json.loads(fetch_bytes(url, mirror=mirror).decode("utf-8"))
 
 
 def post_json(url, payload):
@@ -117,13 +117,13 @@ def is_valid(path, sha1=None, size=None):
     return True
 
 
-def download_file(url, path, sha1=None, size=None, retries=3):
+def download_file(url, path, sha1=None, size=None, retries=3, mirror=True):
     """下载单个文件，返回 True 表示真的下载了，False 表示本地已有。"""
     if is_valid(path, sha1, size):
         return False
     os.makedirs(os.path.dirname(path), exist_ok=True)
     last = None
-    for u in candidate_urls(url):
+    for u in candidate_urls(url, mirror):
         for i in range(retries):
             try:
                 with _open(u) as r:
@@ -159,7 +159,7 @@ def download_all(tasks, progress=None, label="下载文件"):
     done = 0
     errors = []
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = {ex.submit(download_file, t.url, t.path, t.sha1, t.size): t for t in tasks}
+        futures = {ex.submit(download_file, t.url, t.path, t.sha1, t.size, 3, t.mirror): t for t in tasks}
         for fut in as_completed(futures):
             done += 1
             try:

@@ -565,7 +565,7 @@ class GameDir:
         if "optifine/Patcher.class" in names:
             if progress:
                 progress("生成 OptiFine 补丁", 0, 1)
-            j = java.pick(java.find_javas(), max(self.required_java(game_version), 8))
+            j = java.pick(java.find_javas([os.path.join(self.root, "runtime")]), max(self.required_java(game_version), 8))
             if not j:
                 raise RuntimeError("安装 OptiFine 需要 Java，但没有找到")
             client = os.path.join(self.versions, game_version, game_version + ".jar")
@@ -592,7 +592,7 @@ class GameDir:
         procs = [p for p in profile.get("processors", []) if "client" in p.get("sides", ["client"])]
         if not procs:
             return
-        j = java.pick(java.find_javas(), max(self.required_java(game_version), 8))
+        j = java.pick(java.find_javas([os.path.join(self.root, "runtime")]), max(self.required_java(game_version), 8))
         if not j:
             raise RuntimeError("运行安装器需要 Java，但没有找到")
         tmp = os.path.join(self.root, "cache", "installer_data", os.path.basename(installer))

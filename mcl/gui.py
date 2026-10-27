@@ -15,7 +15,7 @@ import webbrowser
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from . import __version__, auth, game, java, mods, net, theme
+from . import __version__, auth, game, java, mods, net, runtime, theme
 from .theme import (ACCENT, ACCENT2, BG, CARD, DANGER, FAMILY, FG, LOG_BG, LOG_FG, MONO, MUTED,
                     SIDEBAR, SIDEBAR_ACTIVE, SIDEBAR_HOVER, SIDEBAR_TEXT, SUB, SUCCESS)
 
@@ -385,11 +385,18 @@ class App(tk.Tk):
             ok(m)
         self.bg(game.fetch_manifest, done, err)
 
-    def scan_java(self):
-        def done(javas):
-            self.javas = javas
+    def java_roots(self):
+        """除了系统里装的，还要扫描启动器自己下载的 Java。"""
+        return [runtime.runtime_root(self.gd.root)]
+
+    def set_javas(self, javas):
+        self.javas = javas
+        if "launch" in self.pages:
             self.pages["launch"].set_javas(javas)
-        self.bg(java.find_javas, done)
+
+    def scan_java(self):
+        roots = self.java_roots()
+        self.bg(lambda: java.find_javas(roots), self.set_javas)
 
     def versions_changed(self, select=None):
         for p in self.pages.values():
@@ -613,8 +620,9 @@ class LaunchPage(Page):
         self.cb_java = ttk.Combobox(g, textvariable=self.var_java, state="readonly", width=10)
         self.cb_java.grid(row=1, column=1, sticky="we", pady=(px(8), 0))
         r = self.row(c)
-        ttk.Button(r, text="重新扫描", command=self.app.scan_java).pack(side="left")
+        ttk.Button(r, text="下载 Java", command=lambda: JavaDownloadDialog(self.app)).pack(side="left")
         ttk.Button(r, text="手动选择…", command=self._browse_java).pack(side="left", padx=px(6))
+        ttk.Button(r, text="↻", style="Ghost.TButton", width=2, command=self.app.scan_java).pack(side="left")
 
         # 日志
         lc = ttk.Frame(self, style="LogCard.TFrame", padding=(px(16), px(12)))
@@ -837,9 +845,11 @@ class LaunchPage(Page):
                 if not j:
                     raise RuntimeError(f"无法识别选择的 Java：{java_sel}")
             else:
-                j = java.pick(self.app.javas or java.find_javas(), required)
-                if not j:
-                    raise RuntimeError(f"没有找到 Java！这个版本需要 Java {required}，请先安装。")
+                javas = java.find_javas(self.app.java_roots())  # 每次重新扫描，刚下载的 Java 也能用上
+                self.app.ui(self.app.set_javas, javas)
+                if runtime.needs_download(javas, required):
+                    raise NeedJava(required, runtime.component_for(gd.resolve(vid), required))
+                j = java.pick(javas, required)
             progress("正在启动", 1, 1)
             cmd, cwd = gd.build_launch_command(vid, j.path, login, cfg["memory"],
                                                cfg["width"], cfg["height"], cfg["jvm_args"])
@@ -860,6 +870,13 @@ class LaunchPage(Page):
 
         def failed(e):
             self.banner.set_enabled(True)
+            if isinstance(e, NeedJava):
+                self.lbl_status.configure(text=f"缺少 Java {e.major}")
+                self.log(f"[喵喵启动器] 这个版本需要 Java {e.major}，本机没有合适的")
+                if messagebox.askyesno("缺少 Java", f"{vid} 需要 Java {e.major}，本机没有合适的。\n\n"
+                                       "要自动下载并安装吗？（Mojang 官方提供，约 100–200 MB）", parent=self.app):
+                    JavaDownloadDialog(self.app, auto=e.component, on_done=self.launch)
+                return
             self.lbl_status.configure(text="启动失败")
             self.log(f"[喵喵启动器] 启动失败：{e}")
             self.app.error(e)
@@ -1444,6 +1461,131 @@ class InstanceDialog(tk.Toplevel):
         self.app.bg(lambda: gd.install_instance(name, gv, sel, progress, self.app.manifest, replace), ok, err)
 
     def _close(self):
+        self.grab_release()
+        self.destroy()
+
+
+# ====================================================================== 下载 Java
+
+class NeedJava(Exception):
+    """启动时发现本机没有合适的 Java。"""
+
+    def __init__(self, major, component):
+        super().__init__(f"需要 Java {major}")
+        self.major, self.component = major, component
+
+
+class JavaDownloadDialog(tk.Toplevel):
+    """下载 Mojang 官方的 Java 运行时，装到游戏目录的 runtime 文件夹，启动时自动选用。
+
+    auto：打开后直接下载这个运行时（启动时缺 Java 用）；on_done：装好后调用（比如接着启动游戏）。
+    """
+
+    def __init__(self, app, auto=None, on_done=None):
+        super().__init__(app)
+        self.app, self.auto, self.on_done = app, auto, on_done
+        self.T = app.theme
+        px = self.T.px
+        self.rts = {}
+        self._busy = False
+        self._closed = False
+        self.title("下载 Java")
+        self.configure(bg=BG)
+        self.transient(app)
+        self.protocol("WM_DELETE_WINDOW", self._close)
+        wrap = ttk.Frame(self, padding=(px(20), px(16)))
+        wrap.pack(fill="both", expand=True)
+        ttk.Label(wrap, text="下载 Java", style="H1.TLabel").pack(anchor="w")
+        ttk.Label(wrap, text="Mojang 官方提供的 Java，下载后自动安装到游戏目录的 runtime 文件夹，启动时自动选用",
+                  style="Sub.TLabel", wraplength=px(500), justify="left").pack(anchor="w", pady=(0, px(12)))
+
+        bottom = ttk.Frame(wrap)
+        bottom.pack(side="bottom", fill="x", pady=(px(12), 0))
+        ttk.Button(bottom, text="关闭", style="Bg.TButton", command=self._close).pack(side="right")
+        self.btn = ttk.Button(bottom, text="下载并安装", style="BgAccent.TButton", command=self.install)
+        self.btn.pack(side="right", padx=px(8))
+        self.btn.state(["disabled"])
+        self.lbl = ttk.Label(bottom, text="", style="Sub.TLabel")
+        self.lbl.pack(side="left")
+        self.bar = ttk.Progressbar(wrap, mode="determinate")
+
+        box = ttk.Frame(wrap, style="Card.TFrame", padding=px(6))
+        box.pack(fill="both", expand=True)
+        frame, self.tree = make_tree(box, ("ver", "suits", "state"), ("Java 版本", "适用的游戏版本", "状态"),
+                                     (190, 160, 90), height=6)
+        frame.pack(fill="both", expand=True)
+        self.tree.bind("<Double-1>", lambda e: self.install())
+        self.tree.bind("<<TreeviewSelect>>", lambda e: self.btn.state(["disabled" if self._busy else "!disabled"]))
+        self.geometry(f"{px(540)}x{px(440)}")
+        center_on(self, app)
+        theme.style_titlebar(self)
+        self.grab_set()
+        self.ov = Overlay(box, self.T, "正在获取 Java 列表…", inset=6)
+        app.bg(runtime.list_runtimes, self._fill, lambda e: self._closed or self.ov.show_message(f"获取失败：{e}"))
+
+    def _fill(self, rts):
+        if self._closed:
+            return
+        self.ov.close()
+        have = runtime.installed(self.app.gd.root)
+        for rt in rts:
+            self.rts[rt["component"]] = rt
+            self.tree.insert("", "end", iid=rt["component"],
+                             values=(f"Java {rt['major']}（{rt['version']}）", rt["suits"],
+                                     "✔ 已安装" if rt["component"] in have else ""),
+                             tags=("accent",) if rt["component"] in have else ())
+        restripe(self.tree)
+        if self.auto in self.rts:
+            self.tree.selection_set(self.auto)
+            self.install()
+        elif rts:
+            first = next((r["component"] for r in rts if r["component"] not in have), rts[0]["component"])
+            self.tree.selection_set(first)
+
+    def _progress(self, text, done, total):
+        if self._closed:
+            return
+        self.bar.configure(maximum=max(total, 1), value=done)
+        self.lbl.configure(text=f"{text}：{done}/{total}" if total > 1 else f"{text}……")
+
+    def install(self):
+        sel = self.tree.selection()
+        if not sel or self._busy:
+            return
+        rt = self.rts[sel[0]]
+        self._busy = True
+        self.btn.state(["disabled"])
+        self.bar.pack(side="bottom", fill="x", pady=(self.T.px(12), 0))
+        progress = self.app.progress_cb(self._progress)
+        root = self.app.gd.root
+
+        def ok(path):
+            self._busy = False
+            self.app.scan_java()
+            self.app.toast(f"Java {rt['major']} 安装好啦")
+            if self._closed:
+                return
+            self.tree.set(rt["component"], "state", "✔ 已安装")
+            self.tree.item(rt["component"], tags=("accent",))
+            self.lbl.configure(text=f"已安装：{path}")
+            self.btn.state(["!disabled"])
+            if self.on_done:
+                self._close()
+                self.on_done()
+
+        def err(e):
+            self._busy = False
+            if not self._closed:
+                self.btn.state(["!disabled"])
+                self.lbl.configure(text="下载失败")
+            self.app.error(e)
+        self.app.bg(lambda: runtime.install(root, rt, progress), ok, err)
+
+    def _close(self):
+        if self._busy and not messagebox.askyesno("正在下载", "Java 还在下载，关掉窗口会在后台继续下载完。\n确定关闭吗？",
+                                                  parent=self):
+            return
+        self._closed = True
         self.grab_release()
         self.destroy()
 

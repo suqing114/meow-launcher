@@ -38,6 +38,8 @@ Windows 下也可以直接双击 `启动.bat`。
   OptiFine 单独安装时会像官方安装器一样用 Patcher 生成补丁库、通过 launchwrapper 启动；OptiFine 的列表和下载来自 BMCLAPI。
 - 选加载器版本时可以「从本机文件」安装或升级：支持 Forge / NeoForge 安装器 jar、OptiFine jar（保留官网文件名）、
   Fabric / Quilt 的版本 json，会校验文件对应的游戏版本。
+- 启动页「下载 Java」可以一键下载 Mojang 官方的 Java 8 / 16 / 17 / 21 / 25，装到游戏目录的 `runtime` 文件夹并自动选用；
+  启动时如果本机没有合适的 Java（例如 1.16.5 及更早要 Java 8），会提示自动下载，装好后接着启动。
 - 每个版本目录下的 `meow.json` 记录装了哪些加载器；别的启动器装的版本会从版本 json 自动识别。
 
 ## 账户

@@ -58,8 +58,10 @@ def info(exe):
     return JavaInfo(exe, v) if v else None
 
 
-def _candidates():
+def _candidates(extra_roots=()):
     found = []
+    for root in extra_roots:  # 喵喵启动器自己下载的 Java：<游戏目录>/runtime/<component>/bin/java
+        found += glob.glob(os.path.join(root, "*", "bin", JAVA_EXE))
     home = os.environ.get("JAVA_HOME")
     if home:
         found.append(os.path.join(home, "bin", JAVA_EXE))
@@ -89,10 +91,10 @@ def _candidates():
     return found
 
 
-def find_javas():
+def find_javas(extra_roots=()):
     seen = set()
     result = []
-    for exe in _candidates():
+    for exe in _candidates(extra_roots):
         if not os.path.isfile(exe):
             continue
         key = os.path.normcase(os.path.realpath(exe))
