@@ -16,12 +16,16 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-from . import __version__, auth, game, imaging, java, mods, net, runtime, theme
+from . import __version__, auth, game, imaging, java, modpack, mods, net, runtime, theme
 from .theme import (ACCENT, ACCENT2, ACCENT_HOVER, BG, CARD, DANGER, FAMILY, FG, LOG_BG, LOG_FG, MONO, MUTED,
                     SIDEBAR, SIDEBAR_ACTIVE, SIDEBAR_HOVER, SIDEBAR_TEXT, SUB, SUCCESS)
 
 IS_WINDOWS = sys.platform.startswith("win")
-APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if getattr(sys, "frozen", False):
+    # 打包成 exe 时，__file__ 在运行时解压出来的临时目录里，退出就删了；配置和游戏文件要放在 exe 旁边
+    APP_DIR = os.path.dirname(os.path.abspath(sys.executable))
+else:
+    APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
 ACCOUNTS_PATH = os.path.join(APP_DIR, "accounts.json")
 REPO_URL = "https://github.com/suqing114/meow-launcher"
@@ -1617,6 +1621,7 @@ class DownloadPage(Page):
             ttk.Checkbutton(r, text={"old_beta": "远古版"}.get(t, TYPE_NAMES[t]), variable=var,
                             style="Card.TCheckbutton", command=self.fill).pack(side="left", padx=(px(18), 0))
         ttk.Button(r, text="刷新列表", command=lambda: self.load(force=True)).pack(side="right")
+        ttk.Button(r, text="导入整合包…", command=self._import_pack).pack(side="right", padx=px(6))
 
         body = ttk.Frame(self)
         body.pack(fill="both", expand=True)
@@ -1654,6 +1659,16 @@ class DownloadPage(Page):
     def on_show(self):
         if not self.app.manifest:
             self.load()
+
+    def _import_pack(self):
+        path = filedialog.askopenfilename(title="选择整合包", filetypes=[("Modrinth 整合包", "*.mrpack"),
+                                                                     ("所有文件", "*.*")])
+        if not path:
+            return
+        try:
+            ModpackDialog(self.app, path=path)
+        except Exception as e:
+            messagebox.showerror("无法导入", str(e), parent=self.app)
 
     def load(self, force=False):
         self.lbl_status.configure(text="正在获取版本列表……")
@@ -1744,7 +1759,8 @@ class DownloadPage(Page):
 
 # ====================================================================== 资源下载
 
-RES_TYPES = [("mod", "Mod"), ("shader", "光影"), ("resourcepack", "资源包")]
+RES_TYPES = [("mod", "Mod"), ("modpack", "整合包"), ("shader", "光影"), ("resourcepack", "资源包")]
+MANAGE_TYPES = [("mod", "Mod"), ("shader", "光影"), ("resourcepack", "资源包")]  # 资源管理里没有整合包
 RES_NAMES = dict(RES_TYPES)
 LOADER_TAGS = {"fabric": "Fabric", "forge": "Forge", "neoforge": "NeoForge", "quilt": "Quilt", "liteloader": "LiteLoader",
                "iris": "Iris", "optifine": "OptiFine", "canvas": "Canvas", "vanilla": "原版光影", "minecraft": ""}
@@ -1760,6 +1776,7 @@ CATEGORY_NAMES = {
     "potato": "土豆配置", "low": "低配", "medium": "中配", "high": "高配", "screenshot": "截图专用",
     "colored-lighting": "彩色光照", "foliage": "植被摆动", "path-tracing": "路径追踪", "blocks": "方块",
     "entities": "实体", "environment": "环境", "items": "物品", "8x-": "8x 及以下",
+    "lightweight": "轻量", "multiplayer": "多人", "challenging": "挑战", "kitchen-sink": "大杂烩", "quests": "任务",
 }
 HEADER_NAMES = {"categories": "分类", "features": "特性", "resolutions": "分辨率", "performance impact": "性能"}
 
@@ -2142,8 +2159,10 @@ class ProjectView(ttk.Frame):
             tk.Label(inner, text=text, bg=CARD, fg=SUB, font=(FAMILY, 9), anchor="w").pack(
                 fill="x", padx=px(16), pady=(px(12), px(4)))
 
-        rec = next((v for v in vs if (not gv or gv in v.get("game_versions", []))
-                    and (not loader or loader in v.get("loaders", []))), None)
+        fits = [v for v in vs if (not gv or gv in v.get("game_versions", []))
+                and (not loader or loader in v.get("loaders", []))]
+        # 优先推荐正式版，没有正式版才推荐测试版
+        rec = next((v for v in fits if v.get("version_type") == "release"), fits[0] if fits else None)
         section(f"推荐版本 · Minecraft {gv}" + (f" · {LOADER_TAGS.get(loader, loader)}" if loader else "")
                 if gv else "最新版本")
         if rec or (not gv and vs):
@@ -2389,6 +2408,109 @@ class VersionDownloadDialog(tk.Toplevel):
         self.destroy()
 
 
+class ModpackDialog(tk.Toplevel):
+    """安装整合包：Modrinth 上的某个版本（version + hit），或者本机的 .mrpack（path）。会装成一个新的游戏版本。"""
+
+    def __init__(self, app, version=None, hit=None, path=None):
+        # 先读整合包：文件不对会直接抛错，不会留下一个空窗口
+        info = modpack.summary(modpack.read_index(path)) if path else None
+        super().__init__(app)
+        self.app, self.version, self.path = app, version, path
+        self.T = app.theme
+        px = self.T.px
+        self._busy = False
+        self._closed = False
+        if path:
+            title, ver = info["name"] or os.path.basename(path), info["version"]
+            gv = info["game"]
+            loaders = [f"{game.LOADER_NAMES[k]} {game.short_version(k, gv, v)}" for k, v in info["loaders"].items()]
+            detail = f"Minecraft {gv}  ·  {' + '.join(loaders) or '原版'}  ·  {info['files']} 个文件"
+            desc = info["summary"]
+        else:
+            title, ver = hit["title"], version.get("version_number", "")
+            gvs = version.get("game_versions", [])
+            loaders = [LOADER_TAGS.get(l, l) for l in version.get("loaders", []) if LOADER_TAGS.get(l, l)]
+            detail = f"Minecraft {', '.join(gvs[-2:])}  ·  {' / '.join(loaders) or '原版'}  ·  {version.get('name', '')}"
+            desc = hit.get("description", "")
+        self.title("安装整合包")
+        self.configure(bg=BG)
+        self.resizable(False, False)
+        self.transient(app)
+        self.protocol("WM_DELETE_WINDOW", self._close)
+        wrap = ttk.Frame(self, padding=(px(22), px(18)))
+        wrap.pack(fill="both", expand=True)
+        ttk.Label(wrap, text="整合包", style="Sub.TLabel").pack(anchor="w")
+        ttk.Label(wrap, text=title, style="H1.TLabel", wraplength=px(480)).pack(anchor="w")
+        ttk.Label(wrap, text=detail, style="Sub.TLabel", wraplength=px(480)).pack(anchor="w", pady=(px(2), 0))
+        if desc:
+            ttk.Label(wrap, text=desc, style="Sub.TLabel", wraplength=px(480), justify="left").pack(
+                anchor="w", pady=(px(6), 0))
+
+        card = ttk.Frame(wrap, style="Card.TFrame", padding=px(18))
+        card.pack(fill="x", pady=(px(14), 0))
+        ttk.Label(card, text="版本名称", style="Card.TLabel").pack(anchor="w")
+        self.var_name = tk.StringVar(value=modpack.default_name(title, ver))
+        ttk.Entry(card, textvariable=self.var_name, width=46).pack(fill="x", pady=(px(4), px(8)))
+        ttk.Label(card, text="会装成一个新的游戏版本：自动装好对应的游戏和加载器，再下载整合包里的 Mod 和配置。",
+                  style="CardSub.TLabel", wraplength=px(440), justify="left").pack(anchor="w")
+        self.bar = ttk.Progressbar(card, mode="determinate")
+        self.lbl = ttk.Label(card, text="", style="CardSub.TLabel", wraplength=px(440), justify="left")
+
+        bottom = ttk.Frame(wrap)
+        bottom.pack(fill="x", pady=(px(16), 0))
+        ttk.Button(bottom, text="取消", style="Bg.TButton", command=self._close).pack(side="right")
+        self.btn = ttk.Button(bottom, text="安装", style="BgAccent.TButton", command=self._install)
+        self.btn.pack(side="right", padx=px(8))
+        center_on(self, app)
+        theme.style_titlebar(self)
+        self.grab_set()
+
+    def _progress(self, text, done, total):
+        if self._closed:
+            return
+        self.bar.configure(maximum=max(total, 1), value=done)
+        self.lbl.configure(text=f"{text}：{done}/{total}" if total > 1 else f"{text}……")
+
+    def _install(self):
+        px = self.T.px
+        name = self.var_name.get().strip()
+        if not name:
+            return
+        self._busy = True
+        self.btn.state(["disabled"])
+        self.bar.pack(fill="x", pady=(px(12), px(4)))
+        self.lbl.pack(anchor="w")
+        progress = self.app.progress_cb(self._progress)
+        gd, manifest, version, path = self.app.gd, self.app.manifest, self.version, self.path
+
+        def work():
+            pack = path or modpack.download(version, os.path.join(gd.root, "cache", "modpacks"), progress)
+            return modpack.install(gd, pack, name, progress, manifest)
+
+        def ok(vid):
+            self._busy = False
+            self.app.versions_changed(select=vid)
+            self.app.toast(f"整合包装好啦：{vid}，去「启动游戏」开玩吧！")
+            if not self._closed:
+                self._close()
+
+        def err(e):
+            self._busy = False
+            if not self._closed:
+                self.btn.state(["!disabled"])
+                self.lbl.configure(text=f"安装失败：{e}")
+            self.app.error(e)
+        self.app.bg(work, ok, err)
+
+    def _close(self):
+        if self._busy and not messagebox.askyesno("正在安装", "整合包还在安装，关掉窗口会在后台继续装完。\n确定关闭吗？",
+                                                  parent=self):
+            return
+        self._closed = True
+        self.grab_release()
+        self.destroy()
+
+
 class ModPage(Page):
     def build(self):
         px = self.px
@@ -2427,11 +2549,16 @@ class ModPage(Page):
             ttk.Label(parent, text=text, style="CardSub.TLabel").pack(side="left", padx=(0, px(6)))
             widget.pack(side="left", padx=(0, px(18)))
             return widget
+        self.inst_box = ttk.Frame(r, style="Surface.TFrame")  # 整合包会装成新版本，用不到「安装到」
+        self.inst_box.pack(side="left")
         self.var_inst = tk.StringVar()
-        self.cb_inst = field(r, "安装到", ttk.Combobox(r, textvariable=self.var_inst, state="readonly", width=28))
+        self.cb_inst = field(self.inst_box, "安装到",
+                             ttk.Combobox(self.inst_box, textvariable=self.var_inst, state="readonly", width=28))
         self.cb_inst.bind("<<ComboboxSelected>>", lambda ev: (self._sync_filters(), self.search(0)))
         self.var_gv = tk.StringVar()
-        field(r, "游戏版本", ttk.Combobox(r, textvariable=self.var_gv, width=9))
+        self.var_gv_box = ttk.Frame(r, style="Surface.TFrame")
+        self.var_gv_box.pack(side="left")
+        field(self.var_gv_box, "游戏版本", ttk.Combobox(self.var_gv_box, textvariable=self.var_gv, width=9))
         self.loader_box = ttk.Frame(r, style="Surface.TFrame")
         self.loader_box.pack(side="left")
         self.cb_loader = field(self.loader_box, "加载器",
@@ -2489,14 +2616,26 @@ class ModPage(Page):
         self.list_view.pack(fill="both", expand=True)
 
     def open_version(self, version, hit):
-        VersionDownloadDialog(self.app, self, version, hit)
+        if self.kind == "modpack":
+            ModpackDialog(self.app, version=version, hit=hit)
+        else:
+            VersionDownloadDialog(self.app, self, version, hit)
 
     def _set_kind(self, kind):
-        self.kind = kind
-        if kind == "mod":
+        was_pack, self.kind = self.kind == "modpack", kind
+        if kind in ("mod", "modpack"):
             self.loader_box.pack(side="left", before=self.lbl_sort)
         else:
             self.loader_box.pack_forget()
+        if kind == "modpack":
+            # 整合包会装成一个新版本：不需要「安装到」，也不按当前版本筛选游戏版本 / 加载器
+            self.inst_box.pack_forget()
+            self.var_gv.set("")
+            self.cb_loader.current(0)
+            self.lbl_status.configure(text="点一个整合包查看版本，安装时会自动装好游戏和加载器")
+        elif was_pack:
+            self.inst_box.pack(side="left", before=self.var_gv_box)
+            self._sync_filters()
         self.back()
         self._load_categories()
         self.search(0)
@@ -2511,7 +2650,12 @@ class ModPage(Page):
         def ok(cats):
             if token == self._cats_token:
                 self.chips.set_items([(k, CATEGORY_NAMES.get(name, name), group) for k, name, group in cats])
-        self.app.bg(lambda: mods.categories(kind, source), ok, lambda e: None)
+
+        def err(e, retry=[2]):  # 网络偶尔抖一下，过两秒再试，最多两次
+            if token == self._cats_token and retry[0] > 0:
+                retry[0] -= 1
+                self.after(2000, lambda: self.app.bg(lambda: mods.categories(kind, source), ok, err))
+        self.app.bg(lambda: mods.categories(kind, source), ok, err)
 
     def refresh_versions(self, select=None):
         vs = self.app.gd.list_versions()
@@ -2536,7 +2680,7 @@ class ModPage(Page):
                                   else "点一项查看详情和全部版本")
 
     def _filters(self):
-        loader = (LOADERS[self.cb_loader.current()][1] or None) if self.kind == "mod" else None
+        loader = (LOADERS[self.cb_loader.current()][1] or None) if self.kind in ("mod", "modpack") else None
         return self.var_gv.get().strip() or None, loader
 
     def search(self, page):
@@ -2589,7 +2733,7 @@ class ModManagePage(Page):
         bar = self.card(pad=12)
         bar.pack(fill="x", pady=(0, px(14)))
         r = self.row(bar)
-        self.seg = Segmented(r, RES_TYPES, self._set_kind)
+        self.seg = Segmented(r, MANAGE_TYPES, self._set_kind)
         self.seg.pack(side="left", padx=(0, px(14)))
         self.var_inst = tk.StringVar()
         self.cb = ttk.Combobox(r, textvariable=self.var_inst, state="readonly", width=26)

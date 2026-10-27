@@ -107,7 +107,7 @@ CF_ENABLED = False
 
 CF_API = "https://api.curseforge.com/v1"
 CF_GAME = 432  # Minecraft
-CF_CLASS = {"mod": 6, "resourcepack": 12, "shader": 6552}
+CF_CLASS = {"mod": 6, "resourcepack": 12, "shader": 6552, "modpack": 4471}
 CF_LOADER = {"forge": 1, "fabric": 4, "quilt": 5, "neoforge": 6}
 CF_LOADER_NAMES = {1: "forge", 4: "fabric", 5: "quilt", 6: "neoforge"}
 CF_SORT = {"relevance": 1, "downloads": 6, "follows": 12, "newest": 11, "updated": 3}

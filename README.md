@@ -10,23 +10,35 @@
 
 ![下载资源](docs/mods.png)
 
-## 运行
+## 下载
 
-需要 Python 3.9+ 和 Java（游戏需要的版本：1.20.5+ 要 Java 21，1.17–1.20.4 要 Java 17，更老的要 Java 8）。
+到 [Releases](https://github.com/suqing114/meow-launcher/releases) 下载 `MeowLauncher.exe`，放进一个单独的文件夹双击运行即可（Windows 10 / 11）。
+配置、账户和游戏文件都会保存在 exe 所在的文件夹里。没有 Java 也没关系，启动器里可以一键下载。
+
+> exe 没有数字签名，第一次运行时 Windows 可能提示「已保护你的电脑」，点「更多信息 → 仍要运行」即可。
+
+## 从源码运行
+
+需要 Python 3.9+。
 
 ```bash
 python main.py
 ```
 
-Windows 下也可以直接双击 `启动.bat`。
+Windows 下也可以直接双击 `启动.bat`。自己打包 exe：
+
+```bash
+pip install pyinstaller
+python tools/build_exe.py
+```
 
 ## 功能
 
 | 页面 | 功能 |
 | --- | --- |
 | 启动游戏 | 多账户（离线 / 微软正版 / 外置登录）、选择版本、内存、自动/手动选择 Java、实时游戏日志；「管理」可以**更换、卸载、加装模组加载器** |
-| 下载游戏 | 列出全部版本（正式版 / 快照 / 远古版，可搜索），像 HMCL 一样**多选**加载器：**Forge / NeoForge / Fabric / Quilt / OptiFine**，冲突的组合会自动禁用 |
-| 下载资源 | 像 HMCL 一样的三级页面：搜索列表（图标、分类、加载器标签，可按**标签多选筛选**，如优化 + 实用）→ 项目详情（推荐版本 + 按 Minecraft 版本分组）→ 下载窗口（**必需依赖自动安装，可选依赖勾选安装**），支持 Mod、光影、资源包，来源为 **Modrinth**（CurseForge 已接入，审核通过后开放），也可以下载到本机目录 |
+| 下载游戏 | 列出全部版本（正式版 / 快照 / 远古版，可搜索），像 HMCL 一样**多选**加载器：**Forge / NeoForge / Fabric / Quilt / OptiFine**，冲突的组合会自动禁用；「导入整合包」可以安装本机的 `.mrpack` |
+| 下载资源 | 像 HMCL 一样的三级页面：搜索列表（图标、分类、加载器标签，可按**标签多选筛选**，如优化 + 实用）→ 项目详情（推荐版本 + 按 Minecraft 版本分组）→ 下载窗口（**必需依赖自动安装，可选依赖勾选安装**），支持 Mod、**整合包**、光影、资源包（整合包会自动装好游戏和加载器，装成一个新版本），来源为 **Modrinth**（CurseForge 已接入，审核通过后开放），也可以下载到本机目录 |
 | 资源管理 | 管理某个版本的 Mod（启用 / 禁用 / 删除）、光影和资源包，支持从本机添加 |
 | 设置 | 游戏目录、下载源（BMCLAPI 镜像 / 官方）、下载线程数、窗口大小、额外 JVM 参数 |
 
@@ -78,6 +90,8 @@ mcl/java.py      扫描本机 Java 并按需求选择
 mcl/auth.py      账户：离线、微软设备码登录、authlib-injector 外置登录
 mcl/imaging.py   图片解码缩放（WebP 等，Windows WIC / Pillow）
 mcl/runtime.py   下载 Mojang 官方 Java 运行时
+mcl/modpack.py   Modrinth 整合包（.mrpack）安装
+tools/build_exe.py  打包成单文件 exe
 mcl/mods.py      Modrinth / CurseForge 搜索、版本、前置依赖解析与下载
 mcl/gui.py       tkinter 界面
 mcl/theme.py     界面主题：纯 Python 生成抗锯齿圆角图片，给 ttk 控件换皮
