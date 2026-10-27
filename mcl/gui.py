@@ -482,9 +482,10 @@ class Banner(tk.Canvas):
         self.tag_bind("btn", "<Button-1>", lambda e: self.enabled and self.command())
 
     def _set_hover(self, on):
+        if on == self.hover:
+            return
         self.hover = on
-        self.configure(cursor="hand2" if on and self.enabled else "")
-        self._draw_button()
+        self._update_button()
 
     def set_info(self, title=None, sub=None, btn_sub=None):
         if title is not None:
@@ -497,7 +498,7 @@ class Banner(tk.Canvas):
 
     def set_enabled(self, on, text="启动游戏"):
         self.enabled, self.btn_text = on, text
-        self._draw_button()
+        self._update_button()
 
     def redraw(self):
         """合并同一轮里的多次重绘请求（启动时会连着 set_info 好几次）。"""
@@ -519,22 +520,33 @@ class Banner(tk.Canvas):
         self._draw_button()
 
     def _draw_button(self):
+        """创建按钮的画布元素，只在整体重绘时调用。
+
+        悬停 / 启用状态变化只用 _update_button 改属性，不能删了重建：
+        删掉鼠标下的元素会触发 <Leave>，重建又触发 <Enter>，会无限循环把界面卡死。
+        """
         px = self.T.px
-        self.delete("btn")
         w = max(self.winfo_width(), 10)
         x, y = w - px(36) - self.bw, (self.h - self.bh) / 2
-        key = "d" if not self.enabled else ("h" if self.hover else "n")
-        self.create_image(x, y, image=self.imgs[key], anchor="nw", tags="btn")
-        color = ACCENT if self.enabled else "#8f99d6"
         cy = y + self.bh / 2
-        if self.T.icon_family:
-            self.create_text(x + px(30), cy, text=self.T.icon("play"), font=self.T.icon_font(16),
-                             fill=color, tags="btn")
-        self.create_text(x + px(54), cy - (px(9) if self.btn_sub else 0), anchor="w", text=self.btn_text,
-                         fill=color, font=(FAMILY, 13, "bold"), tags="btn")
-        if self.btn_sub:
-            self.create_text(x + px(55), cy + px(12), anchor="w", text=self.btn_sub[:24], fill=SUB,
-                             font=(FAMILY, 9), tags="btn")
+        self._btn_img = self.create_image(x, y, anchor="nw", tags="btn")
+        self._btn_icon = self.create_text(x + px(30), cy, text=self.T.icon("play"), font=self.T.icon_font(16),
+                                          tags="btn")
+        self._btn_label = self.create_text(x + px(54), cy - (px(9) if self.btn_sub else 0), anchor="w",
+                                           font=(FAMILY, 13, "bold"), tags="btn")
+        self.create_text(x + px(55), cy + px(12), anchor="w", text=self.btn_sub[:24], fill=SUB,
+                         font=(FAMILY, 9), tags="btn")
+        self._update_button()
+
+    def _update_button(self):
+        if not getattr(self, "_btn_img", None):
+            return
+        key = "d" if not self.enabled else ("h" if self.hover else "n")
+        color = ACCENT if self.enabled else "#8f99d6"
+        self.itemconfigure(self._btn_img, image=self.imgs[key])
+        self.itemconfigure(self._btn_icon, fill=color)
+        self.itemconfigure(self._btn_label, text=self.btn_text, fill=color)
+        self.configure(cursor="hand2" if self.hover and self.enabled else "")
 
 
 class LaunchPage(Page):
