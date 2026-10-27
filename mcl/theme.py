@@ -230,100 +230,81 @@ def banner_bg(w, h, span, r, c0, c1, page_bg, decos):
     return img
 
 
-def _catmull(pts, steps=20):
-    """Catmull-Rom 样条：穿过所有控制点的平滑曲线。"""
-    P = [pts[0]] + list(pts) + [pts[-1]]
-    out = []
-    for i in range(1, len(P) - 2):
-        p0, p1, p2, p3 = P[i - 1], P[i], P[i + 1], P[i + 2]
-        for s in range(steps):
-            t = s / steps
-            t2, t3 = t * t, t * t * t
-            out.append(tuple(0.5 * (2 * p1[k] + (-p0[k] + p2[k]) * t + (2 * p0[k] - 5 * p1[k] + 4 * p2[k] - p3[k]) * t2
-                                    + (-p0[k] + 3 * p1[k] - 3 * p2[k] + p3[k]) * t3) for k in (0, 1)))
-    out.append(tuple(pts[-1]))
-    return out
+def ellipse(cx, cy, a, b):
+    """椭圆（近似距离场，用来抗锯齿足够了）。"""
+    k = min(a, b)
+    return lambda x, y: (math.hypot((x - cx) / a, (y - cy) / b) - 1) * k
 
 
-class Ink:
-    """毛笔墨迹：沿曲线一路「盖」粗细变化的圆点，记录每个像素的墨色覆盖率（取最大值，重叠处不会发黑起锯齿）。"""
-
-    def __init__(self, n):
-        self.n = n
-        self.cov = [0.0] * (n * n)
-
-    def _disc(self, cx, cy, r, strength):
-        n, cov = self.n, self.cov
-        for y in range(max(0, int(cy - r - 1)), min(n, int(cy + r + 2))):
-            dy = y + 0.5 - cy
-            for x in range(max(0, int(cx - r - 1)), min(n, int(cx + r + 2))):
-                c = r + 0.5 - math.hypot(x + 0.5 - cx, dy)
-                if c > 0:
-                    c = min(c, 1.0) * strength
-                    i = y * n + x
-                    if c > cov[i]:
-                        cov[i] = c
-
-    def stroke(self, pts, width, start=0.12, end=0.45, dry=0.0):
-        """一笔：pts 是 0~1 的坐标，width 是最粗处的宽度（相对尺寸）。
-        起笔很快压下变粗，收笔慢慢提起收尖（出锋）；dry 是收笔处的飞白程度。"""
-        n = self.n
-        path = [(x * n, y * n) for x, y in _catmull(pts)]
-        seg = [math.dist(a, b) for a, b in zip(path, path[1:])]
-        total = sum(seg) or 1
-        rmax = width * n / 2
-        s, i, acc = 0.0, 0, 0.0
-        while s <= total:
-            while i < len(seg) - 1 and acc + seg[i] < s:
-                acc += seg[i]
-                i += 1
-            k = (s - acc) / seg[i] if seg[i] else 0
-            (ax, ay), (bx, by) = path[i], path[i + 1]
-            t = s / total
-            press = (t / start) ** 0.55 if t < start else 1.0
-            if t > 1 - end:
-                press = min(press, ((1 - t) / end) ** 0.9)
-            press *= 0.88 + 0.12 * math.sin(math.pi * t)  # 行笔中段略重
-            strength = 1.0
-            if dry and t > 1 - end:  # 飞白：墨淡一点、断断续续
-                strength = 1.0 - dry * (1 - (1 - t) / end) * (0.5 + 0.5 * math.sin(s * 1.7))
-            self._disc(ax + (bx - ax) * k, ay + (by - ay) * k, max(0.35, rmax * press), strength)
-            s += 0.35
+def grow(f, d):
+    """把形状向外扩 d（d<0 向内缩），尖角也会变圆。"""
+    return lambda x, y: f(x, y) - d
 
 
-def cat_logo(n, paper="#f3ead8", ink_color="#1d1b22"):
-    """用毛笔勾勒的猫侧脸（朝左），画在一个宣纸色的圆底上。"""
-    ink = Ink(n)
-    # 后脑 -> 耳朵后沿 -> 耳尖（从脖子往上提笔）
-    ink.stroke([(0.77, 0.86), (0.83, 0.68), (0.82, 0.50), (0.76, 0.36), (0.71, 0.27), (0.665, 0.13)], 0.08,
-               start=0.25, end=0.12)
-    # 耳朵前沿 -> 圆圆的额头 -> 眼前微凹 -> 鼻梁 -> 小鼻头（一笔下来）
-    ink.stroke([(0.655, 0.14), (0.60, 0.25), (0.555, 0.30), (0.47, 0.30), (0.39, 0.33), (0.335, 0.39),
-                (0.305, 0.44), (0.275, 0.475), (0.255, 0.50), (0.252, 0.525)], 0.072, start=0.05, end=0.18)
-    # 鼻子下面 -> 嘴（一小笔，嘴角微微上翘）
-    ink.stroke([(0.262, 0.545), (0.285, 0.57), (0.315, 0.58), (0.34, 0.57)], 0.042, start=0.25, end=0.45)
-    # 下巴 -> 下颌 -> 脖子前面（紧接嘴角，收笔飞白）
-    ink.stroke([(0.30, 0.595), (0.32, 0.635), (0.37, 0.67), (0.45, 0.71), (0.52, 0.78), (0.555, 0.88)], 0.062,
-               start=0.1, end=0.55, dry=0.55)
-    ink.stroke([(0.63, 0.22), (0.66, 0.31)], 0.032, start=0.3, end=0.6)  # 耳内
-    ink.stroke([(0.375, 0.445), (0.41, 0.425), (0.455, 0.435)], 0.05, start=0.25, end=0.45)  # 杏仁眼
-    ink.stroke([(0.555, 0.585), (0.60, 0.62), (0.625, 0.67)], 0.026, start=0.15, end=0.75)  # 脸颊顺毛
-    # 胡须：从口吻处长出来，细长出锋，散开
-    ink.stroke([(0.335, 0.535), (0.22, 0.495), (0.09, 0.465)], 0.02, start=0.1, end=0.7, dry=0.4)
-    ink.stroke([(0.34, 0.55), (0.22, 0.555), (0.085, 0.575)], 0.019, start=0.1, end=0.7, dry=0.4)
+def intersect(f, g):
+    return lambda x, y: max(f(x, y), g(x, y))
 
+
+def cat_logo(n, bg="#ffffff"):
+    """黑白卡通猫头（八字猫花色、大眼睛、ω 嘴吐小舌头），画在白色圆底上。"""
+    k, oy = 0.80, 0.05  # 整体缩小、略往下挪，让耳朵和胡须都落在圆底里
+
+    def P(x, y):  # 设计坐标（0~1）-> 像素
+        return ((0.5 + (x - 0.5) * k) * n, (0.5 + oy + (y - 0.55) * k) * n)
+
+    def S(pts):
+        return [P(x, y) for x, y in pts]
+
+    def L(v):
+        return v * k * n
+
+    def bb(pts, pad=0.0):  # 小部件只在包围盒里计算，快很多
+        xs, ys = [P(x, y)[0] for x, y in pts], [P(x, y)[1] for x, y in pts]
+        return (min(xs) - L(pad), min(ys) - L(pad), max(xs) + L(pad), max(ys) + L(pad))
+
+    small = n < 48  # 小图标去掉高光、眼珠画大一点，免得糊成一团
+    ow = max(1.3, L(0.036))
+    black, white, pink = "#16161c", "#ffffff", "#ff9fb5"
     img = Raster(n, n)
-    img.paint(circle(n / 2, n / 2, n / 2), paper)
-    ir, ig, ib = _rgb(ink_color)
-    px = img.px
-    for i, c in enumerate(ink.cov):
-        j = i * 4
-        if c > 0 and px[j + 3]:
-            px[j] = int(px[j] * (1 - c) + ir * c)
-            px[j + 1] = int(px[j + 1] * (1 - c) + ig * c)
-            px[j + 2] = int(px[j + 2] * (1 - c) + ib * c)
-    return img
+    img.paint(circle(n / 2, n / 2, n / 2), bg)
 
+    face = ellipse(*P(0.5, 0.585), L(0.375), L(0.285))
+    ear_l = grow(polygon(S([(0.17, 0.50), (0.21, 0.13), (0.47, 0.36)])), L(0.02))
+    ear_r = grow(polygon(S([(0.83, 0.50), (0.53, 0.36), (0.79, 0.13)])), L(0.02))
+    head = union(face, ear_l, ear_r)
+    head_bb = bb([(0.09, 0.08), (0.91, 0.91)])
+
+    for side in (-1, 1):  # 胡须，画在头后面
+        cx = 0.5 + side * 0.30
+        for dy, slope in ((-0.02, -0.10), (0.03, 0.0), (0.08, 0.12)):
+            seg = [(cx, 0.66 + dy), (cx + side * 0.17, 0.66 + dy + slope)]
+            img.paint(polyline(S(seg), max(1.0, L(0.017))), black, bbox=bb(seg, 0.02))
+
+    img.paint(grow(head, ow), black, bbox=head_bb)  # 外描边
+    img.paint(head, white, bbox=head_bb)
+    # 八字猫的黑「帽子」，额头中间留一道白色倒 V；压进描边一点，避免接缝漏白线
+    cap_l = polygon(S([(0.0, 0.0), (0.475, 0.0), (0.475, 0.30), (0.43, 0.40), (0.35, 0.46), (0.22, 0.50), (0.0, 0.53)]))
+    cap_r = polygon(S([(1.0, 0.0), (1.0, 0.53), (0.78, 0.50), (0.65, 0.46), (0.57, 0.40), (0.525, 0.30), (0.525, 0.0)]))
+    img.paint(intersect(grow(head, ow * 0.6), union(cap_l, cap_r)), black, bbox=bb([(0.09, 0.08), (0.91, 0.56)]))
+    for pts in ([(0.235, 0.21), (0.255, 0.40), (0.37, 0.33)], [(0.765, 0.21), (0.63, 0.33), (0.745, 0.40)]):
+        img.paint(grow(polygon(S(pts)), L(0.005)), "#f4c7d4", bbox=bb(pts, 0.02))  # 内耳
+
+    for ex, look in ((0.355, 1), (0.645, -1)):  # 大眼睛，眼珠往中间看
+        box = bb([(ex, 0.60)], 0.15)
+        img.paint(circle(*P(ex, 0.60), L(0.088) + ow * 0.7), black, bbox=box)
+        img.paint(circle(*P(ex, 0.60), L(0.088)), white, bbox=box)
+        img.paint(circle(*P(ex + look * 0.025, 0.605), L(0.062 if small else 0.052)), black, bbox=box)
+        if not small:
+            img.paint(circle(*P(ex + look * 0.025 - 0.018, 0.585), L(0.016)), white, bbox=box)
+
+    nose = [(0.47, 0.672), (0.53, 0.672), (0.50, 0.70)]
+    img.paint(grow(polygon(S(nose)), L(0.006)), black, bbox=bb(nose, 0.02))
+    tongue = ellipse(*P(0.5, 0.775), L(0.027), L(0.032))  # 小舌头，只从 ω 嘴下面露一点
+    img.paint(grow(tongue, ow * 0.55), black, bbox=bb([(0.5, 0.775)], 0.07))
+    img.paint(tongue, pink, bbox=bb([(0.5, 0.775)], 0.05))
+    mouth = [(0.43, 0.712), (0.465, 0.745), (0.50, 0.712), (0.535, 0.745), (0.57, 0.712)]
+    img.paint(polyline(S(mouth), max(1.1, L(0.024))), black, bbox=bb(mouth, 0.03))
+    return img
 
 # ---------------------------------------------------------------- 主题
 
