@@ -17,7 +17,7 @@ import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
 from . import __version__, auth, game, imaging, java, mods, net, runtime, theme
-from .theme import (ACCENT, ACCENT2, BG, CARD, DANGER, FAMILY, FG, LOG_BG, LOG_FG, MONO, MUTED,
+from .theme import (ACCENT, ACCENT2, ACCENT_HOVER, BG, CARD, DANGER, FAMILY, FG, LOG_BG, LOG_FG, MONO, MUTED,
                     SIDEBAR, SIDEBAR_ACTIVE, SIDEBAR_HOVER, SIDEBAR_TEXT, SUB, SUCCESS)
 
 IS_WINDOWS = sys.platform.startswith("win")
@@ -1757,8 +1757,86 @@ CATEGORY_NAMES = {
     "atmosphere": "氛围", "bloom": "泛光", "shadows": "阴影", "reflections": "反射", "pbr": "PBR",
     "simplistic": "简约", "themed": "主题", "tweaks": "微调", "combat": "战斗", "audio": "音效", "fonts": "字体",
     "gui": "界面", "models": "模型", "core-shaders": "核心着色器", "locale": "语言", "modded": "Mod 适配",
-    "potato": "低配", "low": "低配", "medium": "中配", "high": "高配", "screenshot": "截图",
+    "potato": "土豆配置", "low": "低配", "medium": "中配", "high": "高配", "screenshot": "截图专用",
+    "colored-lighting": "彩色光照", "foliage": "植被摆动", "path-tracing": "路径追踪", "blocks": "方块",
+    "entities": "实体", "environment": "环境", "items": "物品", "8x-": "8x 及以下",
 }
+HEADER_NAMES = {"categories": "分类", "features": "特性", "resolutions": "分辨率", "performance impact": "性能"}
+
+
+def rounded_rect(cv, x0, y0, x1, y1, r, **kw):
+    """Canvas 上的圆角矩形（平滑多边形）。"""
+    pts = [x0 + r, y0, x1 - r, y0, x1, y0, x1, y0 + r, x1, y1 - r, x1, y1, x1 - r, y1,
+           x0 + r, y1, x0, y1, x0, y1 - r, x0, y0 + r, x0, y0]
+    return cv.create_polygon(pts, smooth=True, **kw)
+
+
+class ChipBar(tk.Canvas):
+    """一排可多选的标签（放不下自动换行）。最前面的「全部」用来清空选择。"""
+
+    def __init__(self, master, T, on_change):
+        super().__init__(master, bg=CARD, highlightthickness=0, bd=0, height=T.px(28))
+        self.T, self.on_change = T, on_change
+        self.items, self.selected = [], set()
+        self.font = tkfont.Font(family=FAMILY, size=9)
+        self._width = 0
+        self.bind("<Configure>", lambda e: e.width != self._width and self.redraw())
+
+    def set_items(self, items):
+        """items：[(key, 显示名, 分组)]"""
+        self.items = items
+        self.selected &= {k for k, _, _ in items}
+        self.redraw()
+
+    def _fills(self, key):
+        on = (key in self.selected) if key else not self.selected
+        return (ACCENT, "#ffffff", ACCENT_HOVER) if on else (BG, SUB, theme.PRESS)
+
+    def redraw(self):
+        px = self.T.px
+        self.delete("all")
+        w = self._width = max(self.winfo_width(), 200)
+        h, gap = px(26), px(6)
+        x = y = 0
+        last_group = None
+        for i, (key, label, group) in enumerate([("", "全部", None)] + list(self.items)):
+            if group != last_group and group is not None and len({g for _, _, g in self.items}) > 1:
+                # 有多个分组时，在每组前面加一个小标题（光影：分类 / 特性 / 性能）
+                title = HEADER_NAMES.get(group, group)
+                tw = self.font.measure(title) + px(6)
+                if x + tw > w and x:
+                    x, y = 0, y + h + gap
+                self.create_text(x + px(2), y + h / 2, text=title, anchor="w", font=self.font, fill=MUTED)
+                x += tw + px(4)
+            last_group = group
+            tw = self.font.measure(label) + px(22)
+            if x + tw > w and x:
+                x, y = 0, y + h + gap
+            bg, fg, _ = self._fills(key)
+            tag = f"c{i}"
+            rounded_rect(self, x, y, x + tw, y + h, px(9), fill=bg, outline="", tags=(tag, f"bg{i}"))
+            self.create_text(x + tw / 2, y + h / 2, text=label, font=self.font, fill=fg, tags=(tag, f"t{i}"))
+            self.tag_bind(tag, "<Button-1>", lambda e, k=key: self.toggle(k))
+            self.tag_bind(tag, "<Enter>", lambda e, i=i, k=key: self._hover(i, k, True))
+            self.tag_bind(tag, "<Leave>", lambda e, i=i, k=key: self._hover(i, k, False))
+            x += tw + gap
+        self.configure(height=y + h)
+
+    def _hover(self, i, key, on):
+        # 只改颜色，不重建元素（重建会触发 Leave / Enter 无限循环）
+        bg, _, hover = self._fills(key)
+        self.itemconfigure(f"bg{i}", fill=hover if on else bg)
+        self.configure(cursor="hand2" if on else "")
+
+    def toggle(self, key):
+        if not key:
+            self.selected.clear()
+        elif key in self.selected:
+            self.selected.discard(key)
+        else:
+            self.selected.add(key)
+        self.redraw()
+        self.on_change()
 VERSION_TYPES = {"release": ("Release", "#2fae76"), "beta": ("Beta", "#e39b2d"), "alpha": ("Alpha", "#e5484d")}
 
 
@@ -2365,6 +2443,13 @@ class ModPage(Page):
         self.cb_sort.pack(side="left")
         self.cb_sort.current(0)
         self.cb_sort.bind("<<ComboboxSelected>>", lambda ev: self.search(0))
+        r = self.row(top, pady=(px(12), 0))
+        ttk.Label(r, text="标签", style="CardSub.TLabel").pack(side="left", anchor="n", padx=(0, px(10)),
+                                                               pady=(px(4), 0))
+        self.chips = ChipBar(r, self.T, lambda: self.search(0))
+        self.chips.pack(side="left", fill="x", expand=True)
+        self._cats_token = 0
+        self._load_categories()
 
         bottom = ttk.Frame(self.list_view)
         bottom.pack(side="bottom", fill="x", pady=(px(12), 0))
@@ -2413,7 +2498,20 @@ class ModPage(Page):
         else:
             self.loader_box.pack_forget()
         self.back()
+        self._load_categories()
         self.search(0)
+
+    def _load_categories(self):
+        """换资源类型 / 来源时换一套标签（后台获取，有缓存）。"""
+        self._cats_token += 1
+        token, kind, source = self._cats_token, self.kind, self.source
+        self.chips.selected.clear()
+        self.chips.set_items([])
+
+        def ok(cats):
+            if token == self._cats_token:
+                self.chips.set_items([(k, CATEGORY_NAMES.get(name, name), group) for k, name, group in cats])
+        self.app.bg(lambda: mods.categories(kind, source), ok, lambda e: None)
 
     def refresh_versions(self, select=None):
         vs = self.app.gd.list_versions()
@@ -2470,13 +2568,14 @@ class ModPage(Page):
         def err(e):
             if token == self._search_token:
                 self._ov.show_message(f"搜索失败：{e}")
-        source = self.source
+        source, cats = self.source, sorted(self.chips.selected)
         self.app.bg(lambda: mods.search(q, gv, loader, sort, page * mods.PAGE_SIZE, project_type=kind,
-                                        source=source), ok, err)
+                                        source=source, categories=cats), ok, err)
 
     def _set_source(self):
         self.source = ["modrinth", "curseforge"][self.cb_source.current()]
         self.back()
+        self._load_categories()
         self.search(0)
 
 

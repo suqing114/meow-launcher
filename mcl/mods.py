@@ -20,19 +20,47 @@ def _get(path, **params):
 FOLDERS = {"mod": "mods", "shader": "shaderpacks", "resourcepack": "resourcepacks"}
 
 
+_HEADER_ORDER = {"categories": 0, "features": 1, "resolutions": 2, "performance impact": 3}
+_categories_cache = {}
+
+
+def categories(project_type="mod", source="modrinth"):
+    """可用来筛选的标签：[(key, 名称, 分组)]。分组：categories / features / resolutions / performance impact。"""
+    key = (project_type, source)
+    if key in _categories_cache:
+        return _categories_cache[key]
+    if source == "curseforge":
+        data = _cf("/categories", {"gameId": CF_GAME, "classId": CF_CLASS[project_type]})["data"]
+        out = [(str(c["id"]), c["name"], "categories") for c in data if not c.get("isClass")]
+    else:
+        out = [(c["name"], c["name"], c["header"]) for c in _get("/tag/category")
+               if c["project_type"] == project_type]
+
+        def order(item):
+            nums = re.findall(r"\d+", item[1])
+            # 分辨率按数字从小到大（8x- < 16x < … < 512x+），其余按名字
+            return (_HEADER_ORDER.get(item[2], 9), int(nums[0]) if item[2] == "resolutions" and nums else 0, item[1])
+        out.sort(key=order)
+    _categories_cache[key] = out
+    return out
+
+
 def search(query="", game_version=None, loader=None, sort="relevance", offset=0, limit=PAGE_SIZE,
-           project_type="mod", source="modrinth"):
+           project_type="mod", source="modrinth", categories=()):
     """返回 {'hits': [...], 'total_hits': n, 'offset': n}；project_type: mod / shader / resourcepack
 
+    categories：要同时满足的标签（categories() 返回的 key）。
     source='curseforge' 时走 CurseForge，结果会转换成和 Modrinth 一样的结构。
     """
     if source == "curseforge":
-        return cf_search(query, game_version, loader, sort, offset, limit, project_type)
+        return cf_search(query, game_version, loader, sort, offset, limit, project_type, categories)
     facets = [[f"project_type:{project_type}"]]
     if game_version:
         facets.append([f"versions:{game_version}"])
     if loader:
         facets.append([f"categories:{loader}"])
+    for c in categories:  # 每个标签单独一组 = 同时满足（和 Modrinth 网站一样）
+        facets.append([f"categories:{c}"])
     return _get("/search", query=query or None, facets=json.dumps(facets),
                 index=sort, offset=offset, limit=limit)
 
@@ -128,10 +156,11 @@ def _cf_hit(m):
 
 
 def cf_search(query="", game_version=None, loader=None, sort="relevance", offset=0, limit=PAGE_SIZE,
-              project_type="mod"):
+              project_type="mod", categories=()):
     offset = min(offset, 10000 - limit)  # CurseForge 最多只能翻到第 10000 条
     data = _cf("/mods/search", {
         "gameId": CF_GAME, "classId": CF_CLASS[project_type], "searchFilter": query or None,
+        "categoryIds": json.dumps([int(c) for c in categories][:10]) if categories else None,
         "gameVersion": game_version, "modLoaderType": CF_LOADER.get(loader) if loader else None,
         "sortField": CF_SORT.get(sort, 2), "sortOrder": "desc", "index": offset, "pageSize": limit})
     total = min(data.get("pagination", {}).get("totalCount", 0), 10000)
