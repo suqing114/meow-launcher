@@ -24,7 +24,7 @@ Windows 下也可以直接双击 `启动.bat`。
 | --- | --- |
 | 启动游戏 | 多账户（离线 / 微软正版 / 外置登录）、选择版本、内存、自动/手动选择 Java、实时游戏日志；「管理」可以**更换、卸载、加装模组加载器** |
 | 下载游戏 | 列出全部版本（正式版 / 快照 / 远古版，可搜索），像 HMCL 一样**多选**加载器：**Forge / NeoForge / Fabric / Quilt / OptiFine**，冲突的组合会自动禁用 |
-| 下载资源 | 像 HMCL 一样的三级页面：搜索列表（图标、分类、加载器标签）→ 项目详情（推荐版本 + 按 Minecraft 版本分组）→ 下载窗口（**必需依赖自动安装，可选依赖勾选安装**），支持 Mod、光影、资源包，也可以下载到本机目录 |
+| 下载资源 | 像 HMCL 一样的三级页面：搜索列表（图标、分类、加载器标签）→ 项目详情（推荐版本 + 按 Minecraft 版本分组）→ 下载窗口（**必需依赖自动安装，可选依赖勾选安装**），支持 Mod、光影、资源包，来源可选 **Modrinth / CurseForge**，也可以下载到本机目录 |
 | 资源管理 | 管理某个版本的 Mod（启用 / 禁用 / 删除）、光影和资源包，支持从本机添加 |
 | 设置 | 游戏目录、下载源（BMCLAPI 镜像 / 官方）、下载线程数、窗口大小、额外 JVM 参数 |
 
@@ -40,6 +40,9 @@ Windows 下也可以直接双击 `启动.bat`。
   Fabric / Quilt 的版本 json，会校验文件对应的游戏版本。
 - 启动页「下载 Java」可以一键下载 Mojang 官方的 Java 8 / 16 / 17 / 21 / 25，装到游戏目录的 `runtime` 文件夹并自动选用；
   启动时如果本机没有合适的 Java（例如 1.16.5 及更早要 Java 8），会提示自动下载，装好后接着启动。
+- **CurseForge** 需要你自己的 API Key（在 [CurseForge 控制台](https://console.curseforge.com/) 免费申请，填到「设置 → CurseForge」）。
+  作者不允许第三方启动器下载的文件会提示到网页手动下载，不会绕过作者的设置。
+- 项目图标支持 **WebP**：Windows 上调用系统自带的 WIC 解码（Win10 1809+ / Win11），装了 Pillow 则优先用 Pillow，仍然不需要第三方库。
 - 依赖会**递归展开**（依赖的依赖），分析过的项目会跳过，循环依赖也不会死循环。安装前会检查 mods 文件夹：
   既用 sha1 向 Modrinth 反查，也读取 jar 里的 Mod ID（`fabric.mod.json`、`quilt.mod.json`、`mods.toml`），从别处下载的依赖也能认出来。
 - 每个版本目录下的 `meow.json` 记录装了哪些加载器；别的启动器装的版本会从版本 json 自动识别。
@@ -68,7 +71,9 @@ mcl/net.py       下载、镜像、重试、校验
 mcl/game.py      版本清单、安装原版/Fabric、库与资源文件、拼启动参数
 mcl/java.py      扫描本机 Java 并按需求选择
 mcl/auth.py      账户：离线、微软设备码登录、authlib-injector 外置登录
-mcl/mods.py      Modrinth 搜索、版本、前置依赖解析与下载
+mcl/imaging.py   图片解码缩放（WebP 等，Windows WIC / Pillow）
+mcl/runtime.py   下载 Mojang 官方 Java 运行时
+mcl/mods.py      Modrinth / CurseForge 搜索、版本、前置依赖解析与下载
 mcl/gui.py       tkinter 界面
 mcl/theme.py     界面主题：纯 Python 生成抗锯齿圆角图片，给 ttk 控件换皮
 ```

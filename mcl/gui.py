@@ -16,7 +16,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-from . import __version__, auth, game, java, mods, net, runtime, theme
+from . import __version__, auth, game, imaging, java, mods, net, runtime, theme
 from .theme import (ACCENT, ACCENT2, BG, CARD, DANGER, FAMILY, FG, LOG_BG, LOG_FG, MONO, MUTED,
                     SIDEBAR, SIDEBAR_ACTIVE, SIDEBAR_HOVER, SIDEBAR_TEXT, SUB, SUCCESS)
 
@@ -39,6 +39,7 @@ DEFAULTS = {
     "last_version": "",
     "account": "",
     "ms_client_id": auth.DEFAULT_CLIENT_ID,
+    "cf_api_key": "",
 }
 
 SOURCES = [("BMCLAPI 镜像（国内推荐）", "bmclapi"), ("官方源", "official")]
@@ -231,6 +232,7 @@ class App(tk.Tk):
         self.cfg = load_config()
         net.set_source(self.cfg["source"])
         net.max_workers = int(self.cfg["threads"])
+        mods.cf_key = self.cfg.get("cf_api_key", "")
         self.gd = game.GameDir(self.cfg["game_dir"])
         self.manifest = None
         self.javas = []
@@ -1780,7 +1782,7 @@ def bind_wheel(widget, canvas):
 
 
 class IconCache:
-    """Modrinth 图标：后台下载，PNG / GIF 直接用（Tk 不认识 WebP，那些就显示首字母）。"""
+    """项目图标：后台下载并解码缩放（WebP 等格式见 imaging.py），解不了就显示首字母。"""
 
     def __init__(self, app, size):
         self.app, self.size = app, app.theme.px(size)
@@ -1795,19 +1797,18 @@ class IconCache:
             self.waiting[url].append(callback)
         else:
             self.waiting[url] = [callback]
-            self.app.bg(lambda: net.fetch_bytes(url, retries=1, mirror=False),
-                        lambda data: self._loaded(url, data), lambda e: self._loaded(url, b""))
+            size = self.size
+            # 下载和解码（WebP 等）都在后台做，主线程只把 PNG 变成 PhotoImage
+            self.app.bg(lambda: imaging.to_png(net.fetch_bytes(url, retries=1, mirror=False), size),
+                        lambda png: self._loaded(url, png), lambda e: self._loaded(url, None))
         return None
 
-    def _loaded(self, url, data):
+    def _loaded(self, url, png):
         img = None
-        if data[:8] == b"\x89PNG\r\n\x1a\n" or data[:6] in (b"GIF87a", b"GIF89a"):
+        if png:
             try:
                 import base64
-                img = tk.PhotoImage(master=self.app, data=base64.b64encode(data).decode("ascii"))
-                factor = -(-max(img.width(), img.height()) // self.size)
-                if factor > 1:
-                    img = img.subsample(factor)
+                img = tk.PhotoImage(master=self.app, data=base64.b64encode(png).decode("ascii"))
             except tk.TclError:
                 img = None
         self.cache[url] = img
@@ -1818,10 +1819,12 @@ class IconCache:
                 pass  # 列表已经换页 / 窗口关了
 
 
-def draw_chips(cv, x, y, names, tags, font, color=ACCENT, fill=None, px=lambda v: v):
-    """在 Canvas 上画一排标签小块，返回右边界 x。"""
+def draw_chips(cv, x, y, names, tags, font, color=ACCENT, fill=None, px=lambda v: v, max_x=None):
+    """在 Canvas 上画一排标签小块，返回右边界 x；超过 max_x 的就不画了。"""
     fill = fill or theme.ACCENT_SOFT
     for name in names:
+        if max_x is not None and x + px(12) + font.measure(name) > max_x:
+            break
         t = cv.create_text(x + px(6), y, text=name, font=font, fill=color, anchor="w", tags=tags)
         x0, y0, x1, y1 = cv.bbox(t)
         r = cv.create_rectangle(x0 - px(5), y0, x1 + px(5), y1, fill=fill, outline="", tags=tags)
@@ -1883,10 +1886,11 @@ class ResultList(ttk.Frame):
                 cv.create_line(px(14), y, w - px(14), y, fill=theme.LINE)
             self._draw_icon(i, h, px(16), y + rh / 2)
             x = px(16) + px(40) + px(14)
-            title = cv.create_text(x, y + px(22), text=h["title"], font=self.f_title, fill=FG, anchor="w", tags=tag)
-            draw_chips(cv, cv.bbox(title)[2] + px(4), y + px(22), tag_list(h), tag, self.f_small, px=px)
             dl = cv.create_text(w - px(18), y + px(22), text=f"↓ {fmt_num(h.get('downloads', 0))}", anchor="e",
                                 font=self.f_small, fill=MUTED, tags=tag)
+            title = cv.create_text(x, y + px(22), text=h["title"], font=self.f_title, fill=FG, anchor="w", tags=tag)
+            draw_chips(cv, cv.bbox(title)[2] + px(4), y + px(22), tag_list(h), tag, self.f_small, px=px,
+                       max_x=cv.bbox(dl)[0] - px(12))
             desc = fit_text(h.get("description", ""), self.f_small, w - x - px(30))
             cv.create_text(x, y + px(48), text=desc, font=self.f_small, fill=SUB, anchor="w", tags=tag)
             cv.tag_bind(tag, "<Enter>", lambda e, i=i: self._hover(i, True))
@@ -1996,7 +2000,8 @@ class ProjectView(ttk.Frame):
         self.lbl_desc = ttk.Label(info, text="", style="CardSub.TLabel", justify="left")
         self.lbl_desc.pack(anchor="w", fill="x", pady=(px(4), 0))
         info.bind("<Configure>", lambda e: self.lbl_desc.configure(wraplength=max(e.width - px(10), 100)))
-        ttk.Button(head, text="Modrinth ↗", style="Ghost.TButton", command=self._web).pack(side="right", anchor="n")
+        self.btn_web = ttk.Button(head, text="Modrinth ↗", style="Ghost.TButton", command=self._web)
+        self.btn_web.pack(side="right", anchor="n")
 
         self.body = page.card(self, pad=4)
         self.body.pack(fill="both", expand=True)
@@ -2008,12 +2013,15 @@ class ProjectView(ttk.Frame):
 
     def _web(self):
         if self.hit:
-            webbrowser.open(f"https://modrinth.com/{self.page.kind}/{self.hit.get('slug') or self.hit['project_id']}")
+            webbrowser.open(self.hit.get("url") or
+                            f"https://modrinth.com/{self.page.kind}/{self.hit.get('slug') or self.hit['project_id']}")
 
     def load(self, hit):
         self.hit = hit
         page = self.page
-        self.lbl_path.configure(text=f"下载资源 › {RES_NAMES[page.kind]} › {hit['title']}")
+        site = "CurseForge" if hit.get("source") == "curseforge" else "Modrinth"
+        self.lbl_path.configure(text=f"下载资源 › {site} › {RES_NAMES[page.kind]} › {hit['title']}")
+        self.btn_web.configure(text=f"{site} ↗")
         self.lbl_title.configure(text=hit["title"])
         self.lbl_tags.configure(text="   ".join(tag_list(hit)))
         self.lbl_desc.configure(text=f"by {hit.get('author', '')}  ·  {fmt_num(hit.get('downloads', 0))} 次下载\n"
@@ -2142,7 +2150,8 @@ class VersionDownloadDialog(tk.Toplevel):
         bottom = ttk.Frame(wrap)
         bottom.pack(side="bottom", fill="x", pady=(px(14), 0))
         ttk.Button(bottom, text="取消", style="Bg.TButton", command=self._close).pack(side="right")
-        ttk.Button(bottom, text="下载到本机目录…", style="Bg.TButton", command=self._save_as).pack(side="right", padx=px(8))
+        self.btn_save = ttk.Button(bottom, text="下载到本机目录…", style="Bg.TButton", command=self._save_as)
+        self.btn_save.pack(side="right", padx=px(8))
         self.btn = ttk.Button(bottom, text=f"安装到 {self.inst}" if self.inst else "安装到当前版本",
                               style="BgAccent.TButton", command=self._install)
         self.btn.pack(side="right")
@@ -2158,6 +2167,15 @@ class VersionDownloadDialog(tk.Toplevel):
         theme.style_titlebar(self)
         self.grab_set()
 
+        if not mods.downloadable(version):
+            self.btn.state(["disabled"])
+            self.btn_save.state(["disabled"])
+            self.lbl.configure(text="这个文件的作者不允许第三方启动器下载，请点「网页」到 CurseForge 上手动下载",
+                               style="Danger.TLabel")
+            ttk.Button(bottom, text="网页", style="Bg.TButton", command=lambda: webbrowser.open(hit.get("url") or "")).pack(
+                side="left")
+            self._fill([], [])
+            return
         if not self.inst:
             self.btn.state(["disabled"])
             self.lbl.configure(text="还没有安装游戏版本，只能下载到本机目录")
@@ -2200,8 +2218,11 @@ class VersionDownloadDialog(tk.Toplevel):
                 self.opt_vars.append((e, var))
                 self._dep_row(inner, e, var)
         missing = [e["project"]["title"] for e in required if e["status"] == "missing"]
-        if missing:
-            self.lbl.configure(text=f"⚠ 找不到适配的版本：{'、'.join(missing)}，装了可能无法启动", style="Danger.TLabel")
+        manual = [e["project"]["title"] for e in required if e["status"] == "manual"]
+        if missing or manual:
+            parts = ([f"找不到适配的版本：{'、'.join(missing)}"] if missing else []) + \
+                    ([f"需要到网页手动下载：{'、'.join(manual)}"] if manual else [])
+            self.lbl.configure(text=f"⚠ {'；'.join(parts)}，缺了可能无法启动", style="Danger.TLabel")
 
     def _dep_row(self, inner, e, var=None):
         px = self.T.px
@@ -2216,6 +2237,8 @@ class VersionDownloadDialog(tk.Toplevel):
                 cb.state(["disabled"])
         if e["status"] == "installed":
             text, color = "✔ 已安装", SUCCESS
+        elif e["status"] == "manual":
+            text, color = "需到网页手动下载", theme.WARNING
         elif e["status"] == "missing":
             text, color = f"找不到适配 {self.gv or ''} 的版本", DANGER
         else:
@@ -2291,7 +2314,8 @@ class VersionDownloadDialog(tk.Toplevel):
 class ModPage(Page):
     def build(self):
         px = self.px
-        self.header("下载资源", "Mod、光影、资源包，数据来自 Modrinth；用英文名搜索效果最好（如 sodium、iris、faithful）")
+        self.header("下载资源", "Mod、光影、资源包，可以从 Modrinth 或 CurseForge 下载；用英文名搜索效果最好（如 sodium、iris、faithful）")
+        self.source = "modrinth"
         self.kind = "mod"
         self.page = 0
         self.total = 0
@@ -2305,6 +2329,10 @@ class ModPage(Page):
         r = self.row(top)
         self.seg = Segmented(r, RES_TYPES, self._set_kind)
         self.seg.pack(side="left", padx=(0, px(12)))
+        self.cb_source = ttk.Combobox(r, state="readonly", width=11, values=["Modrinth", "CurseForge"])
+        self.cb_source.current(0)
+        self.cb_source.bind("<<ComboboxSelected>>", lambda ev: self._set_source())
+        self.cb_source.pack(side="left", padx=(0, px(10)))
         if self.T.icon_family:
             ttk.Label(r, text=self.T.icon("search"), style="CardIcon.TLabel").pack(side="left", padx=(px(4), px(8)))
         self.var_q = tk.StringVar()
@@ -2440,7 +2468,14 @@ class ModPage(Page):
         def err(e):
             if token == self._search_token:
                 self._ov.show_message(f"搜索失败：{e}")
-        self.app.bg(lambda: mods.search(q, gv, loader, sort, page * mods.PAGE_SIZE, project_type=kind), ok, err)
+        source = self.source
+        self.app.bg(lambda: mods.search(q, gv, loader, sort, page * mods.PAGE_SIZE, project_type=kind,
+                                        source=source), ok, err)
+
+    def _set_source(self):
+        self.source = ["modrinth", "curseforge"][self.cb_source.current()]
+        self.back()
+        self.search(0)
 
 
 # ====================================================================== 资源管理
@@ -2633,6 +2668,20 @@ class SettingsPage(Page):
         ttk.Label(g, text="已内置喵喵启动器的 Client ID，一般不用改。", style="CardSub.TLabel").grid(
             row=2, column=1, sticky="w", pady=(px(4), 0))
 
+        c, g = grid_card(self, "puzzle", "CurseForge")
+        c.pack(fill="x", pady=(px(14), 0))
+        label(g, 0, "API Key")
+        row = ttk.Frame(g, style="Surface.TFrame")
+        row.grid(row=0, column=1, sticky="we")
+        self.var_cf = tk.StringVar(value=cfg["cf_api_key"])
+        ttk.Entry(row, textvariable=self.var_cf, show="•").pack(side="left", fill="x", expand=True)
+        ttk.Button(row, text="免费申请 ↗", style="Ghost.TButton",
+                   command=lambda: webbrowser.open("https://console.curseforge.com/")).pack(side="left", padx=(px(6), 0))
+        ttk.Label(g, text="CurseForge 的接口必须带 API Key 才能用：登录 CurseForge 控制台创建一个，复制进来保存即可。"
+                          "填好后在「下载资源」里把来源切到 CurseForge。",
+                  style="CardSub.TLabel", wraplength=px(700), justify="left").grid(row=1, column=1, sticky="w",
+                                                                                   pady=(px(4), 0))
+
         foot = ttk.Frame(self)
         foot.pack(fill="x", pady=(px(18), 0))
         ttk.Button(foot, text="保存设置", style="Big.BgAccent.TButton", command=self.save).pack(side="left")
@@ -2658,6 +2707,7 @@ class SettingsPage(Page):
         cfg["source"] = SOURCES[self.cb_src.current()][1]
         cfg["jvm_args"] = self.var_jvm.get().strip()
         cfg["ms_client_id"] = self.var_cid.get().strip()
+        cfg["cf_api_key"] = mods.cf_key = self.var_cf.get().strip()
         net.set_source(cfg["source"])
         net.max_workers = cfg["threads"]
         self.app.gd = game.GameDir(cfg["game_dir"])

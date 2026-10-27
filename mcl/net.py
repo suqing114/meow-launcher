@@ -71,12 +71,12 @@ def _open(url, data=None, headers=None):
     return urllib.request.urlopen(req, timeout=TIMEOUT)
 
 
-def fetch_bytes(url, retries=2, mirror=True):
+def fetch_bytes(url, retries=2, mirror=True, headers=None):
     last = None
     for u in candidate_urls(url, mirror):
         for i in range(retries):
             try:
-                with _open(u) as r:
+                with _open(u, headers=headers) as r:
                     return r.read()
             except urllib.error.HTTPError as e:
                 last = e
@@ -88,13 +88,13 @@ def fetch_bytes(url, retries=2, mirror=True):
     raise DownloadError(f"无法获取 {url}：{last}")
 
 
-def fetch_json(url, mirror=True):
-    return json.loads(fetch_bytes(url, mirror=mirror).decode("utf-8"))
+def fetch_json(url, mirror=True, headers=None):
+    return json.loads(fetch_bytes(url, mirror=mirror, headers=headers).decode("utf-8"))
 
 
-def post_json(url, payload):
+def post_json(url, payload, headers=None):
     body = json.dumps(payload).encode("utf-8")
-    with _open(url, data=body, headers={"Content-Type": "application/json"}) as r:
+    with _open(url, data=body, headers={"Content-Type": "application/json", **(headers or {})}) as r:
         return json.loads(r.read().decode("utf-8"))
 
 
