@@ -79,11 +79,6 @@ mcl/gui.py       tkinter 界面
 mcl/theme.py     界面主题：纯 Python 生成抗锯齿圆角图片，给 ttk 控件换皮
 ```
 
-## 暂不支持
-
-- CurseForge：API 需要申请 key
-- 自动下载 Java
-
 ## 许可证
 
 [MIT](LICENSE)。Minecraft 是 Mojang Studios 的商标，本项目与 Mojang、Microsoft 无关。
