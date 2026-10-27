@@ -11,3 +11,6 @@ __pycache__/
 build/
 dist/
 *.spec
+
+# 内置的 CurseForge API Key 等私密配置，只留在本机
+mcl/_private.py

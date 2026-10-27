@@ -40,7 +40,8 @@ Windows 下也可以直接双击 `启动.bat`。
   Fabric / Quilt 的版本 json，会校验文件对应的游戏版本。
 - 启动页「下载 Java」可以一键下载 Mojang 官方的 Java 8 / 16 / 17 / 21 / 25，装到游戏目录的 `runtime` 文件夹并自动选用；
   启动时如果本机没有合适的 Java（例如 1.16.5 及更早要 Java 8），会提示自动下载，装好后接着启动。
-- **CurseForge** 需要你自己的 API Key（在 [CurseForge 控制台](https://console.curseforge.com/) 免费申请，填到「设置 → CurseForge」）。
+- **CurseForge** 的 API Key 内置在 `mcl/_private.py`（不在公开仓库里，打包时会一起带上）。自己从源码运行时，
+  到 [CurseForge 控制台](https://console.curseforge.com/) 免费申请一个，填进这个文件即可；没有 Key 时只能用 Modrinth。
   作者不允许第三方启动器下载的文件会提示到网页手动下载，不会绕过作者的设置。
 - 项目图标支持 **WebP**：Windows 上调用系统自带的 WIC 解码（Win10 1809+ / Win11），装了 Pillow 则优先用 Pillow，仍然不需要第三方库。
 - 依赖会**递归展开**（依赖的依赖），分析过的项目会跳过，循环依赖也不会死循环。安装前会检查 mods 文件夹：

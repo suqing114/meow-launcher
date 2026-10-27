@@ -81,7 +81,11 @@ CF_LOADER_NAMES = {1: "forge", 4: "fabric", 5: "quilt", 6: "neoforge"}
 CF_SORT = {"relevance": 1, "downloads": 6, "follows": 12, "newest": 11, "updated": 3}
 CF_RELEASE = {1: "release", 2: "beta", 3: "alpha"}
 CF_DEPENDENCY = {3: "required", 2: "optional"}  # 1 内嵌库、4 工具、5 不兼容、6 包含，都不用装
-cf_key = ""  # 界面从设置里填进来
+try:
+    # 内置的 API Key 放在 mcl/_private.py：已被 .gitignore 排除，不会推到公开仓库，打包时会一起带上
+    from ._private import CURSEFORGE_API_KEY as cf_key
+except ImportError:
+    cf_key = ""
 
 
 class CurseForgeKeyError(Exception):
@@ -90,7 +94,7 @@ class CurseForgeKeyError(Exception):
 
 def _cf(path, params=None, body=None):
     if not cf_key:
-        raise CurseForgeKeyError("使用 CurseForge 需要 API Key：请到「设置 → CurseForge」填写（可在 console.curseforge.com 免费申请）")
+        raise CurseForgeKeyError("这个版本的喵喵启动器没有内置 CurseForge API Key，暂时只能用 Modrinth")
     import urllib.error
     url = CF_API + path + ("?" + urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
                            if params else "")
@@ -101,7 +105,7 @@ def _cf(path, params=None, body=None):
         return net.fetch_json(url, mirror=False, headers=headers)
     except (urllib.error.HTTPError, net.DownloadError) as e:
         if "403" in str(e) or "401" in str(e):
-            raise CurseForgeKeyError("CurseForge 拒绝了这个 API Key，请检查「设置」里填写的是否正确")
+            raise CurseForgeKeyError("CurseForge 拒绝了内置的 API Key（可能已失效），暂时只能用 Modrinth")
         raise
 
 

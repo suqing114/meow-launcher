@@ -39,7 +39,6 @@ DEFAULTS = {
     "last_version": "",
     "account": "",
     "ms_client_id": auth.DEFAULT_CLIENT_ID,
-    "cf_api_key": "",
 }
 
 SOURCES = [("BMCLAPI 镜像（国内推荐）", "bmclapi"), ("官方源", "official")]
@@ -232,7 +231,8 @@ class App(tk.Tk):
         self.cfg = load_config()
         net.set_source(self.cfg["source"])
         net.max_workers = int(self.cfg["threads"])
-        mods.cf_key = self.cfg.get("cf_api_key", "")
+        if not self.cfg.get("ms_client_id"):  # 以前清空过的配置也回到内置的
+            self.cfg["ms_client_id"] = auth.DEFAULT_CLIENT_ID
         self.gd = game.GameDir(self.cfg["game_dir"])
         self.manifest = None
         self.javas = []
@@ -2665,22 +2665,8 @@ class SettingsPage(Page):
                    command=lambda: webbrowser.open(auth.AZURE_REGISTER_URL)).pack(side="left")
         ttk.Button(row, text="申请 Mojang 审核", style="Ghost.TButton",
                    command=lambda: webbrowser.open(auth.MOJANG_REVIEW_URL)).pack(side="left")
-        ttk.Label(g, text="已内置喵喵启动器的 Client ID，一般不用改。", style="CardSub.TLabel").grid(
-            row=2, column=1, sticky="w", pady=(px(4), 0))
-
-        c, g = grid_card(self, "puzzle", "CurseForge")
-        c.pack(fill="x", pady=(px(14), 0))
-        label(g, 0, "API Key")
-        row = ttk.Frame(g, style="Surface.TFrame")
-        row.grid(row=0, column=1, sticky="we")
-        self.var_cf = tk.StringVar(value=cfg["cf_api_key"])
-        ttk.Entry(row, textvariable=self.var_cf, show="•").pack(side="left", fill="x", expand=True)
-        ttk.Button(row, text="免费申请 ↗", style="Ghost.TButton",
-                   command=lambda: webbrowser.open("https://console.curseforge.com/")).pack(side="left", padx=(px(6), 0))
-        ttk.Label(g, text="CurseForge 的接口必须带 API Key 才能用：登录 CurseForge 控制台创建一个，复制进来保存即可。"
-                          "填好后在「下载资源」里把来源切到 CurseForge。",
-                  style="CardSub.TLabel", wraplength=px(700), justify="left").grid(row=1, column=1, sticky="w",
-                                                                                   pady=(px(4), 0))
+        ttk.Label(g, text="已内置喵喵启动器的 Client ID，一般不用改；清空保存会恢复内置的。",
+                  style="CardSub.TLabel").grid(row=2, column=1, sticky="w", pady=(px(4), 0))
 
         foot = ttk.Frame(self)
         foot.pack(fill="x", pady=(px(18), 0))
@@ -2706,8 +2692,8 @@ class SettingsPage(Page):
         cfg["game_dir"] = self.var_dir.get().strip() or DEFAULTS["game_dir"]
         cfg["source"] = SOURCES[self.cb_src.current()][1]
         cfg["jvm_args"] = self.var_jvm.get().strip()
-        cfg["ms_client_id"] = self.var_cid.get().strip()
-        cfg["cf_api_key"] = mods.cf_key = self.var_cf.get().strip()
+        cfg["ms_client_id"] = self.var_cid.get().strip() or auth.DEFAULT_CLIENT_ID
+        self.var_cid.set(cfg["ms_client_id"])
         net.set_source(cfg["source"])
         net.max_workers = cfg["threads"]
         self.app.gd = game.GameDir(cfg["game_dir"])
