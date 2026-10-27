@@ -105,6 +105,8 @@ def _cf(path, params=None, body=None):
         return net.fetch_json(url, mirror=False, headers=headers)
     except (urllib.error.HTTPError, net.DownloadError) as e:
         if "403" in str(e) or "401" in str(e):
+            if path == "/mods/search":  # 这个 Key 能用其他接口，但搜索要通过 CurseForge 审核才开放
+                raise CurseForgeKeyError("内置的 CurseForge API Key 还没有搜索权限（需要向 CurseForge 申请审核），暂时只能用 Modrinth 搜索")
             raise CurseForgeKeyError("CurseForge 拒绝了内置的 API Key（可能已失效），暂时只能用 Modrinth")
         raise
 
@@ -299,8 +301,10 @@ def install_versions(versions, target_dir, log=None):
         if not f.get("url"):
             raise ValueError(f"{v.get('name')} 的作者不允许第三方启动器下载，请到 CurseForge 网页上手动下载")
         log(f"下载 {f['filename']}")
+        # CurseForge 的 CDN 要求下载时也带 API Key（官方公告：不带会返回 401）
+        headers = {"x-api-key": cf_key} if cf_key and "forgecdn.net" in f["url"] else None
         new = net.download_file(f["url"], os.path.join(target_dir, f["filename"]),
-                                f.get("hashes", {}).get("sha1"), f.get("size"))
+                                f.get("hashes", {}).get("sha1"), f.get("size"), headers=headers)
         result.append((f["filename"], new))
     return result
 
