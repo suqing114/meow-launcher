@@ -73,6 +73,10 @@ def downloadable(version):
 # 官方 API 必须带 API Key（https://console.curseforge.com/ 免费申请）。
 # 数据会被转换成和 Modrinth 一样的结构，项目 ID 写成 cf:<modId>，版本 ID 写成 cf:<modId>:<fileId>。
 
+# 内置的 Key 还没通过 CurseForge 审核、没有搜索权限，先在界面上隐藏 CurseForge 来源；
+# 审核通过后改成 True 就会出现在「下载资源 → 来源」里
+CF_ENABLED = False
+
 CF_API = "https://api.curseforge.com/v1"
 CF_GAME = 432  # Minecraft
 CF_CLASS = {"mod": 6, "resourcepack": 12, "shader": 6552}

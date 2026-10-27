@@ -2314,7 +2314,8 @@ class VersionDownloadDialog(tk.Toplevel):
 class ModPage(Page):
     def build(self):
         px = self.px
-        self.header("下载资源", "Mod、光影、资源包，可以从 Modrinth 或 CurseForge 下载；用英文名搜索效果最好（如 sodium、iris、faithful）")
+        sites = "Modrinth 或 CurseForge" if mods.CF_ENABLED else "Modrinth"
+        self.header("下载资源", f"Mod、光影、资源包，数据来自 {sites}；用英文名搜索效果最好（如 sodium、iris、faithful）")
         self.source = "modrinth"
         self.kind = "mod"
         self.page = 0
@@ -2332,7 +2333,8 @@ class ModPage(Page):
         self.cb_source = ttk.Combobox(r, state="readonly", width=11, values=["Modrinth", "CurseForge"])
         self.cb_source.current(0)
         self.cb_source.bind("<<ComboboxSelected>>", lambda ev: self._set_source())
-        self.cb_source.pack(side="left", padx=(0, px(10)))
+        if mods.CF_ENABLED:  # CurseForge 审核通过前不显示「来源」，只用 Modrinth
+            self.cb_source.pack(side="left", padx=(0, px(10)))
         if self.T.icon_family:
             ttk.Label(r, text=self.T.icon("search"), style="CardIcon.TLabel").pack(side="left", padx=(px(4), px(8)))
         self.var_q = tk.StringVar()
