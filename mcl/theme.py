@@ -378,6 +378,7 @@ class Theme:
                 ("CardAccent.TLabel", CARD, ACCENT, (FAMILY, 10, "bold")),
                 ("CardMuted.TLabel", CARD, MUTED, (FAMILY, 10)),
                 ("CardDanger.TLabel", CARD, DANGER, (FAMILY, 9)),
+                ("Danger.TLabel", BG, DANGER, (FAMILY, 9)),
                 ("Log.TLabel", LOG_BG, LOG_FG, (FAMILY, 11, "bold")),
                 ("LogSub.TLabel", LOG_BG, MUTED, (FAMILY, 9))):
             s.configure(name, background=bg, foreground=fg, font=font)
