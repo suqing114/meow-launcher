@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/logo.png" width="128" alt="喵喵启动器"></p>
+
 # 喵喵启动器 MeowLauncher =^･ω･^=
 
 一个类似 HMCL 的 Minecraft 启动器，纯 Python 编写，**不需要安装任何第三方库**（只用标准库 + tkinter）。
