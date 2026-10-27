@@ -336,8 +336,10 @@ class App(tk.Tk):
         self._q.put((fn, args))
 
     def _poll(self):
+        # 每轮最多处理 30ms，剩下的下一轮接着做，避免一次清空大量回调把界面卡住
+        deadline = time.perf_counter() + 0.03
         try:
-            while True:
+            while time.perf_counter() < deadline:
                 fn, args = self._q.get_nowait()
                 try:
                     fn(*args)
@@ -345,7 +347,7 @@ class App(tk.Tk):
                     traceback.print_exc()
         except queue.Empty:
             pass
-        self.after(40, self._poll)
+        self.after(40 if self._q.empty() else 1, self._poll)
 
     def bg(self, fn, ok=None, err=None):
         def worker():
@@ -625,6 +627,8 @@ class LaunchPage(Page):
         self.txt.tag_configure("warn", foreground="#f2c94c")
         self.txt.tag_configure("error", foreground="#ff8080")
         self.txt.tag_configure("meow", foreground="#a5b4ff")
+        self._log_buf = []
+        self._log_lock = threading.Lock()
         self.log("[喵喵启动器] 准备就绪，点击右上角的「启动游戏」开始吧～")
 
         self.refresh_versions(cfg.get("last_version"))
@@ -752,14 +756,42 @@ class LaunchPage(Page):
             self.app.toast(f"已删除 {vid}")
 
     # ---- 日志
-    def log(self, line):
-        tag = ("meow" if line.startswith("[喵喵启动器]") else
-               "error" if "/ERROR]" in line or "/FATAL]" in line or "Exception" in line else
-               "warn" if "/WARN]" in line else ())
-        self.txt.insert("end", line + "\n", tag)
-        if int(self.txt.index("end-1c").split(".")[0]) > 6000:
-            self.txt.delete("1.0", "1000.0")
+    LOG_MAX = 5000  # 文本框里最多保留的行数
+
+    @staticmethod
+    def _log_tag(line):
+        return ("meow" if line.startswith("[喵喵启动器]") else
+                "error" if "/ERROR]" in line or "/FATAL]" in line or "Exception" in line else
+                "warn" if "/WARN]" in line else "")
+
+    def log(self, *lines):
+        """一次插入多行（只调用一次 insert / see，大量日志时也不卡）。"""
+        args = []
+        for line in lines:
+            args += [line + "\n", self._log_tag(line)]
+        self.txt.insert("end", *args)
+        n = int(self.txt.index("end-1c").split(".")[0])
+        if n > self.LOG_MAX:
+            self.txt.delete("1.0", f"{n - self.LOG_MAX}.0")
         self.txt.see("end")
+
+    def _queue_log(self, line):
+        """后台线程调用：先攒进缓冲区，界面空下来时一批写进去。"""
+        with self._log_lock:
+            self._log_buf.append(line)
+            first = len(self._log_buf) == 1
+        if first:
+            self.app.ui(self._flush_log)
+
+    def _flush_log(self):
+        with self._log_lock:
+            buf, self._log_buf = self._log_buf, []
+        # 一批太多时只显示最后 800 行：一次插入几千行也要卡半秒
+        if len(buf) > 800:
+            skipped = len(buf) - 800
+            buf = [f"[喵喵启动器] （日志刷得太快，省略了 {skipped} 行）"] + buf[-800:]
+        if buf:
+            self.log(*buf)
 
     def _progress(self, text, done, total):
         self.lbl_status.configure(text=f"{text} {done}/{total}" if total > 1 else text)
@@ -827,9 +859,9 @@ class LaunchPage(Page):
         for raw in proc.stdout:
             text = parser.feed(decode_line(raw).rstrip("\r\n"))
             if text is not None:
-                self.app.ui(self.log, text)
+                self._queue_log(text)
         code = proc.wait()
-        self.app.ui(self.log, f"[喵喵启动器] 游戏已退出，退出码 {code}")
+        self._queue_log(f"[喵喵启动器] 游戏已退出，退出码 {code}")
         self.app.ui(self.lbl_status.configure, {"text": f"游戏已退出（{code}）"})
 
 

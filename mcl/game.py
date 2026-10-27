@@ -327,6 +327,10 @@ class GameDir:
 
     def game_version_of(self, vid):
         j = self.read_json(vid)
+        # HMCL 会把原版和加载器合并成一个 json，原版版本号记在 patches 里
+        for patch in j.get("patches", []):
+            if patch.get("id") == "game" and patch.get("version"):
+                return patch["version"]
         while j.get("inheritsFrom"):
             parent = j["inheritsFrom"]
             if not os.path.isfile(self.json_path(parent)):
